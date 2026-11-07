@@ -1,0 +1,13 @@
+{
+  "title": "Demo funder view — not an approved grant reporting specification",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "reporting_period": {"type": "string", "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])$"},
+    "service_type": {"type": "string", "enum": ["counseling"]},
+    "session_count": {"type": "integer", "minimum": 0, "maximum": 1},
+    "language": {"type": "string", "enum": ["en", "es", "ht", "unknown"]},
+    "service_area": {"type": "string", "enum": ["Little Havana", "West Little River", "unknown"]}
+  },
+  "required": ["reporting_period", "service_type", "session_count", "language", "service_area"]
+}
