@@ -21,6 +21,18 @@ let currentGeneration = null;
 let dirty = false;
 let draftId = window.location.pathname.startsWith("/notes/")
   ? window.location.pathname.split("/")[2] : null;
+let draftOpened = !draftId;
+let openingDraft = false;
+const reviewerSessionKey = "take-one-send-one.reviewer_name";
+try {
+  reviewerInput.value = sessionStorage.getItem(reviewerSessionKey) || reviewerInput.value;
+} catch (_) { /* The existing name field still works when storage is unavailable. */ }
+
+function rememberReviewer() {
+  try {
+    sessionStorage.setItem(reviewerSessionKey, reviewerInput.value.trim());
+  } catch (_) { /* Session storage is optional. */ }
+}
 
 function showStatus(message, error = false) {
   status.textContent = message;
@@ -118,7 +130,7 @@ function renderGeneration(result) {
     generationStatus.textContent = "The note or rules changed. Generate fresh views for review.";
     return;
   }
-  if (result.reviewer_name) reviewerInput.value = result.reviewer_name;
+  if (!reviewerInput.value.trim() && result.reviewer_name) reviewerInput.value = result.reviewer_name;
   const failures = result.failed_rules || [];
   if (result.status === "BLOCKED") {
     generationStatus.textContent = `BLOCKED — ${failures.join(", ")}. Decision recorded in the ledger.`;
@@ -168,20 +180,41 @@ async function loadDraft() {
     dateInput.value = [today.getFullYear(), String(today.getMonth() + 1).padStart(2, "0"), String(today.getDate()).padStart(2, "0")].join("-");
     return;
   }
+  if (draftOpened || openingDraft) return;
   fields.disabled = true;
+  viewsPanel.hidden = false;
+  generateButton.disabled = true;
+  if (!reviewerInput.value.trim()) {
+    showStatus("Enter the reviewing counselor's name below and press Tab to open this draft.");
+    reviewerInput.focus();
+    return;
+  }
+  openingDraft = true;
+  reviewerInput.disabled = true;
   showStatus("Loading draft…");
   try {
-    const draft = await responseData(await fetch(`/api/drafts/${encodeURIComponent(draftId)}`, { cache: "no-store" }));
+    const reviewer = encodeURIComponent(reviewerInput.value.trim());
+    const draft = await responseData(await fetch(`/api/drafts/${encodeURIComponent(draftId)}?reviewer_name=${reviewer}`, { cache: "no-store" }));
     referenceInput.value = draft.client_reference;
     dateInput.value = draft.session_date;
     noteInput.value = draft.note;
+    draftOpened = true;
+    rememberReviewer();
     fields.disabled = false;
     showStatus("");
     await loadGeneration();
   } catch (error) {
     showStatus(error.message === "Failed to fetch" ? "Could not load the draft. Refresh to try again." : error.message, true);
+  } finally {
+    openingDraft = false;
+    reviewerInput.disabled = false;
   }
 }
+
+reviewerInput.addEventListener("blur", () => {
+  rememberReviewer();
+  if (draftId && !draftOpened) loadDraft();
+});
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();

@@ -50,6 +50,10 @@ class GenerationNotFoundError(Exception):
     pass
 
 
+class ReviewerNameRequiredError(ValueError):
+    pass
+
+
 def _canonical(value: dict) -> bytes:
     return json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -71,10 +75,9 @@ def verify_ledger(path: Path) -> Chain:
     if not path.exists():
         return Chain(previous, count, frozenset())
 
-    base_fields = {
-        "version", "sequence", "event_id", "timestamp", "action", "draft_id",
-        "payload_hash", "previous_hash", "hash",
-    }
+    chain_fields = {"version", "sequence", "event_id", "timestamp", "draft_id", "previous_hash", "hash"}
+    base_fields = chain_fields | {"action", "payload_hash"}
+    viewed_fields = chain_fields | {"event", "reviewer_name"}
     generation_fields = {
         "generation_id", "status", "checks", "failed_rules", "reason_codes",
         "rules_hash", "output_hash", "reviewer_name",
@@ -88,6 +91,8 @@ def verify_ledger(path: Path) -> Chain:
                     raise LedgerIntegrityError("Invalid ledger structure.")
                 version = row.get("version")
                 required = base_fields if version == 1 else base_fields | generation_fields
+                if version == 6:
+                    required = viewed_fields
                 if version in {3, 4, 5}:
                     required |= review_fields
                 if version in {4, 5}:
@@ -99,15 +104,24 @@ def verify_ledger(path: Path) -> Chain:
                     or not isinstance(row, dict)
                     or set(row) != required
                     or type(row["version"]) is not int
-                    or row["version"] not in {1, 2, 3, 4, 5}
+                    or row["version"] not in {1, 2, 3, 4, 5, 6}
                     or type(row["sequence"]) is not int
                     or row["sequence"] != sequence
                     or row["previous_hash"] != previous
-                    or any(not isinstance(row[key], str) for key in base_fields - {"version", "sequence"})
-                    or len(row["payload_hash"]) != 64
+                    or any(not isinstance(row[key], str) for key in chain_fields - {"version", "sequence"})
+                    or (version != 6 and (
+                        not isinstance(row["action"], str) or not isinstance(row["payload_hash"], str)
+                        or len(row["payload_hash"]) != 64
+                    ))
                 ):
                     raise LedgerIntegrityError("Invalid ledger structure.")
-                if version == 1:
+                if version == 6:
+                    if (
+                        row["event"] != "VIEWED" or not isinstance(row["reviewer_name"], str)
+                        or not is_named_human(row["reviewer_name"])
+                    ):
+                        raise LedgerIntegrityError("Invalid draft view event.")
+                elif version == 1:
                     if row["action"] not in {"draft.create.requested", "draft.update.requested"}:
                         raise LedgerIntegrityError("Invalid draft action.")
                 elif (
@@ -351,16 +365,18 @@ def gate(
     action: str = "save", reviewer_name: str = "", release_requested: bool = False,
     generator=None, generation_id: str | None = None, reason: str = "", reason_code: str = "",
 ) -> dict:
-    """All draft mutations: lock, verify, durably log intent, then change SQLite.
+    """Draft access and mutations: lock, verify, durably log, then return or store.
 
     BEGIN IMMEDIATE obtains SQLite's cross-process writer lock; it changes no draft
     data. Holding it until commit also serializes ledger appends across workers.
     A database failure after logging leaves a valid request row in the ledger.
     """
-    if action not in {"save", "generate", "release", "refuse"}:
+    if action not in {"save", "generate", "release", "refuse", "view"}:
         raise ValueError("Unknown gate action.")
     if action == "save" and draft is None:
         raise ValueError("A draft is required for saving.")
+    if action == "view" and draft_id is None:
+        raise ValueError("A draft is required for viewing.")
     payload = draft.model_dump(mode="json") if draft is not None else None
     with closing(store.connect()) as connection, connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -382,6 +398,22 @@ def gate(
                 raise DraftNotFoundError()
 
         chain = _verified_chain(store, connection)
+
+        if action == "view":
+            reviewer_name = reviewer_name.strip()
+            if not is_named_human(reviewer_name):
+                raise ReviewerNameRequiredError("Enter the reviewing counselor's name before opening this draft.")
+            row = {
+                "version": 6, "sequence": chain.length + 1, "event_id": str(uuid4()),
+                "event": "VIEWED", "draft_id": draft_id, "reviewer_name": reviewer_name,
+                "timestamp": now, "previous_hash": chain.head,
+            }
+            row["hash"] = hashlib.sha256(_canonical(row)).hexdigest()
+            _append_ledger(store.ledger_path, row)
+            connection.commit()
+            return {key: existing[key] for key in (
+                "id", "client_reference", "session_date", "note", "created_at", "updated_at",
+            )}
 
         if action in {"release", "refuse"}:
             checks = {name: "NOT_EVALUATED" for name in RULE_NAMES}

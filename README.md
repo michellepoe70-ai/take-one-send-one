@@ -63,6 +63,19 @@ Stop the server with Ctrl+C.
   contain optional text in `reason`. The same `no_identifiers` check screens that
   text before any ledger append. A failed check records `BLOCKED` with the unsafe
   text omitted from the ledger, response, and review table.
+- Version 6 rows record the `VIEWED` event when a saved draft is opened for
+  review. They contain only the draft UUID, named reviewer, timestamp, and chain
+  metadata; they contain no note text, funder fields, or status. The same `gate()`
+  appends, flushes, and syncs this row before the single-draft API returns the
+  note. A missing reviewer or failed audit write prevents the note from opening.
+  Viewing leaves draft and generation states unchanged.
+
+The existing Reviewing counselor field supplies the name for opening a saved
+note. Enter it and press Tab if prompted; it is remembered for this browser tab's
+session. The `/notes/{id}` route serves only the empty HTML shell. Its single
+`GET /api/drafts/{id}?reviewer_name=...` data request records one `VIEWED` event
+before any saved note text is displayed. Generation refreshes do not log another
+view; reopening or refreshing the draft does.
 
 ## Generate views from a saved note
 

@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.store import DraftInput, DraftNotFoundError, GenerationNotFoundError, LedgerIntegrityError, Store, gate
+from app.store import DraftInput, DraftNotFoundError, GenerationNotFoundError, LedgerIntegrityError, ReviewerNameRequiredError, Store, gate
 
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -92,11 +92,17 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         return store.list_drafts()
 
     @application.get("/api/drafts/{draft_id}")
-    def get_draft(draft_id: UUID) -> dict:
+    def get_draft(draft_id: UUID, reviewer_name: str = Query(default="", max_length=100)) -> dict:
         try:
-            return store.get_draft(str(draft_id))
+            return gate(store, action="view", draft_id=str(draft_id), reviewer_name=reviewer_name)
         except DraftNotFoundError:
             raise HTTPException(404, "Draft not found.") from None
+        except ReviewerNameRequiredError:
+            raise HTTPException(422, "Enter the reviewing counselor's name before opening this draft.") from None
+        except LedgerIntegrityError:
+            raise HTTPException(503, "Ledger verification failed. Draft was not opened.") from None
+        except (OSError, sqlite3.Error):
+            raise HTTPException(503, "The view could not be recorded. Draft was not opened.") from None
 
     def save(draft: DraftInput, draft_id: str | None = None) -> dict:
         try:

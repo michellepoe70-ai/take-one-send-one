@@ -36,15 +36,20 @@ async function loadLedger() {
         "views.release": "Release decision",
         "views.refuse": "Refusal decision",
       };
-      heading.textContent = titles[row.action] || row.action;
+      heading.textContent = row.event === "VIEWED" ? "Draft opened for review" : (titles[row.action] || row.action);
       const badge = document.createElement("span");
       badge.className = "state-badge";
-      badge.dataset.state = row.status || "REQUESTED";
-      badge.textContent = (row.status || "REQUESTED").replaceAll("_", " ");
+      if (row.event) {
+        badge.dataset.event = row.event;
+        badge.textContent = row.event;
+      } else {
+        badge.dataset.state = row.status || "REQUESTED";
+        badge.textContent = (row.status || "REQUESTED").replaceAll("_", " ");
+      }
       header.append(sequence, heading, badge);
       const metadata = document.createElement("p");
       metadata.className = "ledger-meta";
-      metadata.textContent = `${new Date(row.timestamp).toLocaleString()} · ${row.action}${row.reviewer_name ? ` · ${row.reviewer_name}` : ""}`;
+      metadata.textContent = `${new Date(row.timestamp).toLocaleString()} · ${row.event || row.action}${row.reviewer_name ? ` · ${row.reviewer_name}` : ""}`;
       const decision = document.createElement("p");
       decision.className = "ledger-decision";
       const refusalLabel = row.reason_code === "other" ? "Other — see internal note for details"

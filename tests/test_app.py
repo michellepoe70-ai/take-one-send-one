@@ -5,6 +5,7 @@ import threading
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from unittest.mock import patch
@@ -47,6 +48,8 @@ class AppTests(unittest.TestCase):
         self.assertFalse(self.thread.is_alive(), "Test server did not stop.")
 
     def request(self, path, method="GET", body=None):
+        if method == "GET" and path.startswith("/api/drafts/") and path.count("/") == 3 and "?" not in path:
+            path += "?" + urllib.parse.urlencode({"reviewer_name": "Demo HTTP Reviewer"})
         data = None if body is None else json.dumps(body).encode()
         request = urllib.request.Request(
             self.base + path, data=data, method=method,
@@ -88,10 +91,10 @@ class AppTests(unittest.TestCase):
             status, _, updated = self.request(f"/api/drafts/{identifier}", "PUT", self.payload("Updated demo."))
             self.assertEqual(status, 200)
             self.assertEqual(updated["created_at"], first["created_at"])
-            self.assertEqual(guarded.call_count, 2)
+            self.assertEqual(guarded.call_count, 3)
         self.assertEqual(Store(self.store.data_dir).get_draft(identifier)["note"], "Updated demo.")
         self.assertEqual(len(self.store.list_drafts()), 1)
-        self.assertEqual(verify_ledger(self.store.ledger_path).length, 2)
+        self.assertEqual(verify_ledger(self.store.ledger_path).length, 3)
 
     def test_invalid_input_and_missing_drafts_do_not_write(self):
         for payload in (
@@ -113,7 +116,83 @@ class AppTests(unittest.TestCase):
         status, _, error = self.request(f"/api/drafts/{first['id']}", "PUT", self.payload("Must not save."))
         self.assertEqual(status, 503)
         self.assertIn("Ledger verification failed", error["detail"])
-        self.assertEqual(self.request(f"/api/drafts/{first['id']}")[2]["note"], first["note"])
+        self.assertEqual(self.request(f"/api/drafts/{first['id']}")[0], 503)
+        self.assertEqual(self.store.get_draft(first["id"])["note"], first["note"])
+
+    def test_opening_draft_writes_one_viewed_event_with_reviewer_before_returning_note(self):
+        import os
+        saved, _ = self.ready_generation()
+        draft_before = self.store.get_draft(saved["id"])
+        generation_before = self.store.latest_generation(saved["id"])
+        reviewer = "Michelle Poe RN, Right Human in the Loop"
+        path = f"/api/drafts/{saved['id']}?" + urllib.parse.urlencode({"reviewer_name": reviewer})
+        original_fsync = os.fsync
+        synced = []
+
+        def inspect_sync(descriptor):
+            original_fsync(descriptor)
+            row = json.loads(self.store.ledger_path.read_text(encoding="utf-8").splitlines()[-1])
+            self.assertEqual(row["event"], "VIEWED")
+            self.assertEqual(row["reviewer_name"], reviewer)
+            synced.append(row["hash"])
+
+        # The HTML shell contains no draft content and must not create a second event.
+        self.assertEqual(self.request(f"/notes/{saved['id']}")[0], 200)
+        with patch("app.main.gate", wraps=gate) as guarded, patch("app.store.os.fsync", side_effect=inspect_sync):
+            status, headers, opened = self.request(path)
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(opened, draft_before)
+        self.assertEqual(len(synced), 1)
+        guarded.assert_called_once()
+        self.assertEqual(guarded.call_args.kwargs["action"], "view")
+        rows = self.store.ledger_rows()["rows"]
+        viewed = [row for row in rows if row.get("event") == "VIEWED"]
+        self.assertEqual(len(viewed), 1)
+        row = viewed[0]
+        self.assertEqual(row["draft_id"], saved["id"])
+        self.assertEqual(row["previous_hash"], rows[-2]["hash"])
+        self.assertEqual(set(row), {
+            "version", "sequence", "event_id", "event", "draft_id", "reviewer_name",
+            "timestamp", "previous_hash", "hash",
+        })
+        self.assertNotIn(saved["note"], json.dumps(row))
+        self.assertEqual(self.store.latest_generation(saved["id"]), generation_before)
+        self.assertEqual(self.store.get_draft(saved["id"]), draft_before)
+        with patch("app.store._append_ledger", side_effect=OSError("test failure")):
+            status, _, failure = self.request(path)
+        self.assertEqual(status, 503)
+        self.assertNotIn("note", failure)
+        self.assertNotIn(saved["note"], json.dumps(failure))
+        for name in ("", "AI"):
+            missing_name = f"/api/drafts/{saved['id']}?" + urllib.parse.urlencode({"reviewer_name": name})
+            self.assertEqual(self.request(missing_name)[0], 422)
+        self.assertEqual(len([row for row in self.store.ledger_rows()["rows"] if row.get("event") == "VIEWED"]), 1)
+
+    def test_viewed_events_preserve_mixed_hash_chain_and_released_status(self):
+        from app.store import LedgerIntegrityError
+        saved, generated = self.ready_generation()
+        for name, release_first in (("First Reviewer", False), ("Second Reviewer", True)):
+            if release_first:
+                decision = self.request(f"/api/generations/{generated['id']}/release", "POST", {"reviewer_name": "Release Reviewer"})[2]
+                self.assertEqual(decision["status"], "RELEASED")
+            path = f"/api/drafts/{saved['id']}?" + urllib.parse.urlencode({"reviewer_name": name})
+            self.assertEqual(self.request(path)[0], 200)
+        self.request("/api/drafts", "POST", self.payload("Another fictional note."))
+        rows = self.store.ledger_rows()["rows"]
+        chain = verify_ledger(self.store.ledger_path)
+        self.assertEqual(chain.length, 7)
+        self.assertEqual(chain.head, rows[-1]["hash"])
+        self.assertEqual([row["reviewer_name"] for row in rows if row.get("event") == "VIEWED"], ["First Reviewer", "Second Reviewer"])
+        self.assertEqual({row["version"] for row in rows}, {1, 2, 5, 6})
+        for previous, current in zip(rows, rows[1:]):
+            self.assertEqual(current["previous_hash"], previous["hash"])
+        self.assertEqual(self.store.latest_generation(saved["id"])["status"], "RELEASED")
+        self.assertEqual(self.store.quarterly_totals(2026, 4)["session_count"], 1)
+        rows[3]["reviewer_name"] = "Changed Reviewer"
+        self.store.ledger_path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        with self.assertRaises(LedgerIntegrityError):
+            verify_ledger(self.store.ledger_path)
 
     def test_ledger_write_failure_returns_503_and_no_draft(self):
         with patch("app.store.os.fsync", side_effect=OSError("test failure")):
