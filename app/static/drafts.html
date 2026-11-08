@@ -5,16 +5,25 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Drafts | Take One, Send One</title>
     <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/theme.css">
     <script src="/static/drafts.js" defer></script>
   </head>
   <body>
-    <header>
-      <a class="brand" href="/">Take One, Send One<span>Tidepath Family Alliance</span></a>
-      <nav aria-label="Main navigation"><a href="/">New note</a><a href="/drafts" aria-current="page">Drafts</a></nav>
+    <header class="app-sidebar">
+      <a class="brand" href="/"><img src="/static/brand.svg" width="44" height="44" alt=""><span class="brand-label">Take One,<br> Send One<span class="brand-subtitle">Tidepath Family Alliance</span></span></a>
+      <p class="nav-label">Your workspace</p>
+      <nav aria-label="Main navigation">
+        <a href="/"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12"/></svg>New note</a>
+        <a href="/drafts" aria-current="page"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="3" width="11" height="14" rx="2"/><path d="M8 7h5M8 10h5M2 6v10a2 2 0 0 0 2 2"/></svg>Drafts</a>
+        <a href="/ledger"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7"/><path d="M10 6v4l3 2"/></svg>Ledger</a>
+      </nav>
+      <div class="sidebar-foot"><span class="local-dot"></span><strong>Local prototype</strong><p>Fictional notes only</p></div>
     </header>
+    <div class="workspace-topbar"><span>Tidepath Family Alliance <b>/</b> Drafts</span><span class="workspace-label">Counseling workspace</span></div>
     <main>
-      <p class="eyebrow">Local prototype · Fictional notes only</p>
-      <div class="heading-row"><div><h1>Drafts</h1><p class="intro">Continue a saved session note.</p></div><a class="button" href="/">New note</a></div>
+      <p class="eyebrow">Your session records</p>
+      <div class="heading-row"><div><h1>Your drafts</h1><p class="intro">Saved session notes, ready when you are.</p></div><a class="button" href="/"><span aria-hidden="true">＋</span> New note</a></div>
+      <div class="history-heading"><h2>Drafts</h2><span class="history-order">Recently saved</span></div>
       <p id="status" class="status" role="status" aria-live="polite">Loading drafts…</p>
       <section id="empty-state" class="panel" hidden><h2>No drafts yet</h2><p>Save your first session note to see it here.</p><a href="/">Write a note</a></section>
       <ul id="draft-list" class="draft-list" aria-label="Saved drafts"></ul>

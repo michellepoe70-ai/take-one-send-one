@@ -65,7 +65,7 @@ class AppTests(unittest.TestCase):
         return {"client_reference": "DEMO-HTTP", "session_date": "2026-11-07", "note": note}
 
     def test_pages_and_health_are_served_without_caching(self):
-        for path in ("/", "/drafts", "/static/style.css", "/static/note.js", "/static/drafts.js"):
+        for path in ("/", "/drafts", "/ledger", "/static/style.css", "/static/note.js", "/static/drafts.js", "/static/ledger.js"):
             with self.subTest(path=path):
                 status, headers, _ = self.request(path)
                 self.assertEqual(status, 200)
@@ -154,6 +154,51 @@ class AppTests(unittest.TestCase):
         self.assertEqual(result["funder_view"], SAFE_OUTPUT["funder_view"])
         self.assertEqual(model.call_args.args[0]["note"], first["note"])
         self.assertEqual(self.request(f"/api/drafts/{first['id']}/generation")[2]["funder_view"], SAFE_OUTPUT["funder_view"])
+
+    def ready_generation(self):
+        from test_generation import SAFE_OUTPUT
+        saved = self.request("/api/drafts", "POST", self.payload())[2]
+        with patch("app.generation.produce_views", return_value=SAFE_OUTPUT):
+            generated = self.request(f"/api/drafts/{saved['id']}/generate", "POST", {"reviewer_name": "Demo Generator"})[2]
+        return saved, generated
+
+    def test_release_refusal_ledger_and_quarterly_over_http(self):
+        released_draft, released = self.ready_generation()
+        refused_draft, refused = self.ready_generation()
+        self.ready_generation()  # A held output must not be counted.
+        status, _, decision = self.request(f"/api/generations/{released['id']}/release", "POST", {"reviewer_name": "Demo Reviewer"})
+        self.assertEqual(status, 200)
+        self.assertEqual(decision["status"], "RELEASED")
+        status, _, decision = self.request(f"/api/generations/{refused['id']}/refuse", "POST", {"reviewer_name": "Demo Reviewer", "reason": "Revise this fictional output."})
+        self.assertEqual(decision["status"], "REFUSED")
+        self.assertEqual(self.request(f"/api/drafts/{released_draft['id']}/generation")[2]["status"], "RELEASED")
+        self.assertEqual(self.request(f"/api/drafts/{refused_draft['id']}/generation")[2]["review_reason"], "Revise this fictional output.")
+        ledger = self.request("/api/ledger")[2]
+        self.assertEqual(ledger["count"], 11)
+        self.assertEqual(ledger["rows"][-1]["status"], "REFUSED")
+        from test_generation import SAFE_OUTPUT
+        self.assertEqual(ledger["rows"][-2]["released_funder_view"], SAFE_OUTPUT["funder_view"])
+        self.assertIsNone(ledger["rows"][-1]["released_funder_view"])
+        totals = self.request("/api/quarterly?year=2026&quarter=4")[2]
+        self.assertEqual(totals, {"year": 2026, "quarter": 4, "released_rows": 1, "session_count": 1})
+        self.assertEqual(self.request("/api/quarterly?year=2026&quarter=3")[2]["session_count"], 0)
+
+    def test_review_requires_name_and_reason_and_valid_target(self):
+        _, generated = self.ready_generation()
+        path = f"/api/generations/{generated['id']}"
+        self.assertEqual(self.request(path + "/release", "POST", {})[2]["failed_rules"], ["named_human"])
+        result = self.request(path + "/refuse", "POST", {"reviewer_name": "Demo Reviewer"})[2]
+        self.assertEqual(result["reason_codes"]["release_gate"], "refusal_reason_required")
+        self.assertEqual(self.request(f"/api/generations/{uuid4()}/release", "POST", {"reviewer_name": "Demo Reviewer"})[0], 404)
+        self.assertEqual(self.request(path + "/release", "POST", {"reviewer_name": "Demo Reviewer", "override": True})[0], 422)
+        self.assertEqual(self.request("/api/quarterly?year=2026&quarter=5")[0], 422)
+
+    def test_ledger_and_quarterly_fail_closed_on_broken_chain(self):
+        self.ready_generation()
+        with self.store.ledger_path.open("ab") as ledger:
+            ledger.write(b"broken\n")
+        self.assertEqual(self.request("/api/ledger")[0], 503)
+        self.assertEqual(self.request("/api/quarterly?year=2026&quarter=4")[0], 503)
 
 
 if __name__ == "__main__":

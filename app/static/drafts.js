@@ -13,6 +13,9 @@ async function loadDrafts() {
       const link = document.createElement("a");
       link.className = "draft-link";
       link.href = `/notes/${encodeURIComponent(draft.id)}`;
+      const icon = document.createElement("span");
+      icon.className = "draft-icon";
+      icon.setAttribute("aria-hidden", "true");
       const details = document.createElement("div");
       const reference = document.createElement("strong");
       reference.textContent = draft.client_reference;
@@ -21,9 +24,10 @@ async function loadDrafts() {
       const updated = document.createElement("p");
       updated.textContent = `Saved ${new Date(draft.updated_at).toLocaleString()}`;
       const action = document.createElement("span");
+      action.className = "draft-open";
       action.textContent = "Open draft →";
       details.append(reference, session, updated);
-      link.append(details, action);
+      link.append(icon, details, action);
       item.append(link);
       list.append(item);
     }

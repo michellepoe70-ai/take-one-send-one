@@ -3,12 +3,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.store import DraftInput, DraftNotFoundError, LedgerIntegrityError, Store, gate
+from app.store import DraftInput, DraftNotFoundError, GenerationNotFoundError, LedgerIntegrityError, Store, gate
 
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -18,6 +18,12 @@ class GenerateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     reviewer_name: str = Field(default="", max_length=100)
     release_requested: bool = False
+
+
+class ReviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    reviewer_name: str = Field(default="", max_length=100)
+    reason: str = Field(default="", max_length=1000)
 
 
 def create_app(data_dir: Path | None = None) -> FastAPI:
@@ -57,6 +63,24 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     @application.get("/drafts", include_in_schema=False)
     def drafts_page() -> FileResponse:
         return FileResponse(STATIC_DIR / "drafts.html")
+
+    @application.get("/ledger", include_in_schema=False)
+    def ledger_page() -> FileResponse:
+        return FileResponse(STATIC_DIR / "ledger.html")
+
+    @application.get("/api/ledger")
+    def ledger_rows() -> dict:
+        try:
+            return store.ledger_rows()
+        except (LedgerIntegrityError, OSError, sqlite3.Error):
+            raise HTTPException(503, "Ledger verification failed. Rows were not displayed.") from None
+
+    @application.get("/api/quarterly")
+    def quarterly_totals(year: int = Query(ge=1, le=9999), quarter: int = Query(ge=1, le=4)) -> dict:
+        try:
+            return store.quarterly_totals(year, quarter)
+        except (LedgerIntegrityError, OSError, sqlite3.Error):
+            raise HTTPException(503, "Ledger or released snapshot verification failed. Totals were not calculated.") from None
 
     @application.get("/health")
     def health() -> dict[str, str]:
@@ -113,6 +137,27 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(503, "Ledger verification failed. Generation was stopped.") from None
         except (OSError, sqlite3.Error):
             raise HTTPException(503, "Generation could not be recorded. Keep the saved note and try again.") from None
+
+    def review(generation_id: UUID, request: ReviewRequest, action: str) -> dict:
+        try:
+            return gate(
+                store, action=action, generation_id=str(generation_id),
+                reviewer_name=request.reviewer_name, reason=request.reason,
+            )
+        except (GenerationNotFoundError, DraftNotFoundError):
+            raise HTTPException(404, "Generated views not found.") from None
+        except LedgerIntegrityError:
+            raise HTTPException(503, "Ledger verification failed. Review was stopped.") from None
+        except (OSError, sqlite3.Error):
+            raise HTTPException(503, "Review could not be recorded. Reopen the note to check its status before retrying.") from None
+
+    @application.post("/api/generations/{generation_id}/release")
+    def release(generation_id: UUID, request: ReviewRequest) -> dict:
+        return review(generation_id, request, "release")
+
+    @application.post("/api/generations/{generation_id}/refuse")
+    def refuse(generation_id: UUID, request: ReviewRequest) -> dict:
+        return review(generation_id, request, "refuse")
 
     return application
 

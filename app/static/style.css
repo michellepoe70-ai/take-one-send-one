@@ -20,8 +20,8 @@ label { display: block; font-weight: 650; font-size: 14px; margin: 0 0 8px; }
 input, textarea { display: block; width: 100%; padding: 12px; margin: 0 0 24px; border: 1px solid #91aaa0; border-radius: 6px; color: #173c3c; background: #fff; font: inherit; }
 textarea { line-height: 1.65; resize: vertical; min-height: 240px; }
 input::placeholder, textarea::placeholder { color: #6b7e77; opacity: 1; }
-button, .button { display: inline-block; padding: 12px 18px; border: 0; background: #20594d; color: #fff; border-radius: 6px; text-decoration: none; font: inherit; font-weight: 650; cursor: pointer; }
-button:hover, .button:hover { background: #164337; }
+button, .button { display: inline-block; padding: 12px 18px; border: 0; background: #15385e; color: #fff; border-radius: 6px; text-decoration: none; font: inherit; font-weight: 650; cursor: pointer; }
+button:hover, .button:hover { background: #0d2643; }
 button:disabled { opacity: .65; cursor: wait; }
 :focus-visible { outline: 3px solid #bd7523; outline-offset: 3px; }
 .actions { display: flex; align-items: center; flex-wrap: wrap; gap: 24px; }
@@ -44,6 +44,25 @@ button:disabled { opacity: .65; cursor: wait; }
 .rule-checks .fail { color: #a13026; font-weight: 650; }
 pre { padding: 18px; border: 1px solid #d9e1dc; border-radius: 6px; background: #f6f7f3; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; font-size: 14px; }
 [hidden] { display: none !important; }
+.review-controls { margin-top: 24px; }
+.review-controls textarea { min-height: 88px; }
+button.secondary { background: #fff; color: #8d6316; border: 1px solid #8d6316; }
+button.secondary:hover { background: #fbf5e6; }
+.ledger-main { max-width: 1040px; }
+.quarterly-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 20px; padding: 0; border: 0; border-radius: 0; }
+.quarterly-form input, .quarterly-form select { margin: 0; }
+.quarterly-form input { width: 120px; }
+select { padding: 12px; border: 1px solid #91aaa0; border-radius: 6px; color: #173c3c; background: #fff; font: inherit; }
+.totals { display: flex; flex-wrap: wrap; gap: 48px; margin: 24px 0 0; }
+.totals dt { color: #476260; font-size: 14px; }
+.totals dd { margin: 4px 0 0; font-size: 32px; font-weight: 700; }
+.head-hash { color: #476260; font-size: 14px; }
+.ledger-rows { list-style: none; padding: 0; }
+.ledger-rows > li { margin: 20px 0; }
+.ledger-rows h3 { margin: 0 0 12px; }
+.ledger-rows p { font-size: 14px; line-height: 1.7; }
+.ledger-rows code, .head-hash code { display: block; overflow-wrap: anywhere; font-size: 13px; }
+details summary { cursor: pointer; color: #20594d; }
 @media (max-width: 600px) {
   header { flex-wrap: wrap; gap: 16px; padding: 20px 24px; }
   main { margin-top: 32px; }

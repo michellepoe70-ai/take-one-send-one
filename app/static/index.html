@@ -5,18 +5,27 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>New note | Take One, Send One</title>
     <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/theme.css">
     <script src="/static/note.js" defer></script>
   </head>
   <body>
-    <header>
-      <a class="brand" href="/">Take One, Send One<span>Tidepath Family Alliance</span></a>
-      <nav aria-label="Main navigation"><a href="/" aria-current="page">New note</a><a href="/drafts">Drafts</a></nav>
+    <header class="app-sidebar">
+      <a class="brand" href="/"><img src="/static/brand.svg" width="44" height="44" alt=""><span class="brand-label">Take One,<br> Send One<span class="brand-subtitle">Tidepath Family Alliance</span></span></a>
+      <p class="nav-label">Your workspace</p>
+      <nav aria-label="Main navigation">
+        <a href="/" aria-current="page"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12"/></svg>New note</a>
+        <a href="/drafts"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="3" width="11" height="14" rx="2"/><path d="M8 7h5M8 10h5M2 6v10a2 2 0 0 0 2 2"/></svg>Drafts</a>
+        <a href="/ledger"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7"/><path d="M10 6v4l3 2"/></svg>Ledger</a>
+      </nav>
+      <div class="sidebar-foot"><span class="local-dot"></span><strong>Local prototype</strong><p>Fictional notes only</p></div>
     </header>
+    <div class="workspace-topbar"><span>Tidepath Family Alliance <b>/</b> Session notes</span><span class="workspace-label">Counseling workspace</span></div>
     <main>
-      <p class="eyebrow">Local prototype · Fictional notes only</p>
+      <p class="eyebrow">Care, captured once</p>
       <h1 id="page-title">New session note</h1>
-      <p class="intro">Save your session note as a local draft.</p>
+      <p class="intro">A thoughtful space for your session notes and human review.</p>
       <form id="note-form">
+        <div class="section-heading form-heading"><div><p class="section-label">Session record</p><h2>Session details</h2></div><span class="soft-badge">Local draft</span></div>
         <fieldset id="note-fields">
           <div class="form-row">
             <div><label for="client-reference">Client reference</label><input id="client-reference" name="client_reference" maxlength="100" placeholder="Example: DEMO-001" autocomplete="off" required></div>
@@ -24,12 +33,12 @@
           </div>
           <label for="note">Session note</label>
           <textarea id="note" name="note" rows="12" maxlength="20000" placeholder="Write the session note here…" autocomplete="off" required></textarea>
-          <div class="actions"><button type="submit" id="save-button">Save draft</button><a href="/drafts">View drafts</a></div>
+          <div class="actions"><button type="submit" id="save-button">Save draft</button><a href="/drafts" class="text-link">View drafts <span aria-hidden="true">↗</span></a></div>
         </fieldset>
         <p id="status" class="status" role="status" aria-live="polite"></p>
       </form>
       <section id="views-panel" class="panel views-panel" aria-labelledby="views-heading" hidden>
-        <h2 id="views-heading">Internal note &amp; funder view</h2>
+        <p class="section-label">Human review</p><h2 id="views-heading">Internal note &amp; funder view</h2>
         <p>Generate both views from this saved note. The funder view uses the demo reporting rules and stays local for review.</p>
         <label for="reviewer-name">Reviewing counselor</label>
         <input id="reviewer-name" maxlength="100" autocomplete="off" placeholder="Enter the human reviewer's name">
@@ -38,8 +47,15 @@
         <ul id="rule-checks" class="rule-checks" aria-label="Rule checks"></ul>
         <div id="generated-views" hidden>
           <h3>Internal note</h3><pre id="internal-note"></pre>
-          <h3>Demo funder view</h3><pre id="funder-view"></pre>
+          <h3>Demo funder view</h3><dl id="funder-view" class="funder-summary"></dl>
+          <p id="review-receipt"></p>
+          <div id="review-controls" class="review-controls" hidden>
+            <label for="refusal-reason">Refusal reason</label>
+            <textarea id="refusal-reason" rows="3" maxlength="1000" placeholder="Required when refusing; recorded in the ledger."></textarea>
+            <div class="actions"><button id="release-button" type="button">Release</button><button id="refuse-button" type="button" class="secondary">Refuse</button><a href="/ledger">View ledger</a></div>
+          </div>
         </div>
+        <p id="review-status" class="status" role="status" aria-live="polite"></p>
       </section>
     </main>
   </body>

@@ -6,6 +6,8 @@ notes once and prepare funder reports containing only the required information.
 The app includes a session-note form, drafts, SQLite persistence, and a single
 ledger-first `gate()`. Saved notes can generate a structured internal note and
 a constrained funder preview using the OpenAI Agents SDK.
+The review panel supports named-human Release and Refuse decisions. The Ledger
+page shows the full audit history and calculates released-only quarterly totals.
 
 ## Run on Windows
 
@@ -30,6 +32,7 @@ Stop the server with Ctrl+C.
 ## Drafts and ledger
 
 - `/` is the new-note form; `/drafts` lists saved drafts; `/notes/{id}` reopens one.
+- `/ledger` lists every verified ledger row with its full hash and previous hash.
 - The form saves a client reference, session date, and session note.
 - Local data is in ignored `data/drafts.db` and `data/ledger.jsonl`.
 - Both create and update requests use the one `gate()` in `app/store.py`.
@@ -53,6 +56,13 @@ Stop the server with Ctrl+C.
   status, all five checks, failed rule names, reason codes, policy/output hashes,
   generation UUID, and the reviewing counselor's name. The ledger contains no
   source note, generated internal narrative, client reference, or API key.
+- Version 3 review rows preserve the same chain and add the review reason and a
+  hash of the released funder snapshot. Refusal reasons are reviewer-entered
+  audit text; they are displayed on the internal Ledger page.
+- New version 4 review rows also contain `released_funder_view` on `RELEASED`
+  decisions. This is the exact structured funder object, included in the row's
+  hash and checked against `released_funder_hash`. Other review decisions store
+  `null`. Earlier rows remain unchanged and verifiable.
 
 ## Generate views from a saved note
 
@@ -65,6 +75,9 @@ grant reporting specification. It is the source of the funder field allowlist
 and strict structured-output model. Only reporting period, service type, session
 count, language, and service area are allowed; values are constrained to a month,
 bounded integers, or enumerations. Unknown language or area stays `unknown`.
+Plain-language labels, month names, and language names are a browser display
+layer only; the stored and released funder values retain their original schema
+keys and codes.
 
 All five decisions are made inside `gate()`:
 
@@ -74,7 +87,7 @@ All five decisions are made inside `gate()`:
 | `no_identifiers` | Block client-list requests by diagnosis before any model call. Reject identifier fields, the source client reference, emails, phone-like strings, and diagnosis-code labels in generated funder content. |
 | `no_narrative` | Validate funder values against the constrained schema; reject free text, objects, lists, and invalid values. Internal narrative is kept separate. |
 | `named_human` | Require a non-placeholder counselor name before normal generation. It is recorded locally and in audit metadata; this prototype does not authenticate that identity. |
-| `release_gate` | Hold generated views locally for human review. Every release request is blocked; there is no sending, exporting, or release capability in this step. A name is not release approval. |
+| `release_gate` | Hold generation for review. Release requires the explicit review action, current source/rules, valid output hashes, and all five passing checks. Requests to release as part of generation remain blocked. |
 
 A dangerous source request produces a durable `BLOCKED` decision immediately.
 Otherwise a `STARTED` ledger row is flushed and synced before the SDK receives
@@ -89,6 +102,33 @@ prevents the model call or storing a result.
 The gate holds SQLite's writer lock through the bounded model request, so this
 local prototype serializes writes during generation. Editing a note or its rules
 makes older generated views `STALE` and hides them until regeneration.
+
+## Release, Refuse, and quarterly totals
+
+On a `READY_FOR_REVIEW` result, enter the reviewing counselor's name and use
+**Release** or **Refuse**. Refuse also requires a brief reason of up to 1,000
+characters. Both operations pass through the same `gate()` and append and sync
+their ledger row before storing the review decision in SQLite.
+
+- Release records `RELEASED` and approves an immutable local funder snapshot for
+  reporting. The gate rechecks the schema, identifier/narrative rules, named
+  reviewer, source/policy hashes, reporting month, and original generated output.
+- Refuse records `REFUSED`, the reviewer, and the reason.
+- Blocked or failed generations cannot be released. Stale outputs must be
+  regenerated before release. A generation can have only one final review
+  decision, and a saved note can be released only once, preventing duplicate totals.
+- Reviewed snapshots keep their decision and original data after later edits.
+  The review panel identifies when the current note or rules have changed.
+
+Open **Ledger**, select a year and quarter, and click **Quarterly**. Totals use
+the released funder view's `reporting_period` month, and show released row count
+and summed `session_count`. Held, blocked, refused, and failed results are
+excluded. Only committed release records whose ledger row and snapshot hash
+verify are counted. If database storage fails after a ledger decision, that
+uncommitted decision does not contribute to totals. Broken chains or changed
+release snapshots stop calculation rather than returning partial totals.
+
+Release approves local reporting data; this app does not deliver it to a funder.
 
 ## Eight fictional demo notes
 
@@ -130,6 +170,9 @@ ledger-before-database and ledger-before-model ordering, failed writes, tamperin
 truncation, concurrent saves, seed idempotence, stale views, and the real SDK's
 strict output schema/configuration. Model responses in automated tests are
 controlled fixtures; they do not consume API credits.
+Review tests also cover named reviewers, refusal reasons, repeated/concurrent
+decisions, stale or altered content, append-before-store ordering, failed
+storage, and released-only quarterly boundaries and snapshots.
 
 ## API key
 

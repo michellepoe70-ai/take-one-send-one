@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from agents import AgentOutputSchema
+from openai import APIConnectionError, APIStatusError, APITimeoutError
 
 from app.generation import GenerationUnavailable, produce_views
 from app.policy import RULE_NAMES, load_policy
@@ -153,6 +154,22 @@ class GenerationGateTests(unittest.TestCase):
         self.assertNotIn(secret_error, self.store.ledger_path.read_text(encoding="utf-8"))
         self.assertEqual(self.rows()[-1]["status"], "ERROR")
 
+    def test_only_allowlisted_generation_diagnostics_reach_the_ledger(self):
+        for code, expected in (
+            ("api_connection_failed", "api_connection_failed"),
+            ("api_quota_exhausted", "api_quota_exhausted"),
+            ("private provider text or key", "generation_failed"),
+        ):
+            with self.subTest(code=code):
+                result = gate(
+                    self.store, draft_id=self.saved["id"], action="generate",
+                    reviewer_name="Demo Counselor",
+                    generator=Mock(side_effect=GenerationUnavailable(code)),
+                )
+                self.assertEqual(result["reason_codes"], {"generation": expected})
+                self.assertEqual(self.rows()[-1]["reason_codes"], {"generation": expected})
+        self.assertNotIn("private provider text or key", self.store.ledger_path.read_text(encoding="utf-8"))
+
     def test_bad_rules_fail_closed_before_a_model_call(self):
         rules_path = self.store.data_dir / "invalid-rules.json"
         rules_path.write_text('{"type":"object","properties":{"story":{"type":"string"}}}', encoding="utf-8")
@@ -192,6 +209,41 @@ class GenerationGateTests(unittest.TestCase):
 
 
 class AgentsIntegrationTests(unittest.TestCase):
+    def test_runner_failures_preserve_safe_categories_without_provider_text(self):
+        request = SimpleNamespace()
+        private = "fictional-private-key-and-counseling-text"
+
+        def status_error(status, code=None):
+            return APIStatusError(
+                private, response=SimpleNamespace(status_code=status, request=request, headers={}),
+                body={"code": code, "message": private},
+            )
+
+        cases = (
+            (APIConnectionError(request=request), "api_connection_failed"),
+            (APITimeoutError(request=request), "api_request_timeout"),
+            (status_error(401), "api_authentication_failed"),
+            (status_error(403), "api_permission_denied"),
+            (status_error(404), "api_model_unavailable"),
+            (status_error(429, "credit_balance_exhausted"), "api_quota_exhausted"),
+            (status_error(429, "insufficient_quota"), "api_quota_exhausted"),
+            (status_error(429, private), "api_rate_limited"),
+            (status_error(400), "api_request_rejected"),
+            (status_error(503), "api_service_error"),
+            (RuntimeError("Event loop is closed " + private), "generation_event_loop_closed"),
+            (RuntimeError(private), "generation_runtime_error"),
+            (Exception(private), "generation_failed"),
+        )
+        for error, code in cases:
+            with self.subTest(code=code):
+                with patch("app.generation._settings", return_value={"OPENAI_API_KEY": "fictional-test-key"}):
+                    with patch("app.generation.Runner.run", new_callable=AsyncMock, side_effect=error) as runner:
+                        with self.assertRaises(GenerationUnavailable) as caught:
+                            produce_views({"session_date": "2026-11-07", "note": "Fictional note."}, load_policy())
+                        self.assertEqual(str(caught.exception), code)
+                        self.assertNotIn(private, str(caught.exception))
+                        runner.assert_awaited_once()
+
     def test_actual_sdk_strict_output_schema_and_runner_configuration(self):
         policy = load_policy()
         schema = AgentOutputSchema(policy.output_model).json_schema()

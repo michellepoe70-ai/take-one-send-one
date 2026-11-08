@@ -5,16 +5,55 @@ import json
 from pathlib import Path
 
 from agents import Agent, ModelSettings, OpenAIResponsesModel, RunConfig, Runner
-from openai import AsyncOpenAI
+from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
+from pydantic import ValidationError
 
 from app.policy import Policy
 
 
 ENV_PATH = Path(__file__).parent.parent / ".env"
 
+# Only these static values may reach the ledger or the browser. Never preserve
+# provider messages, response bodies, headers, credentials, or counseling text.
+GENERATION_REASON_CODES = frozenset({
+    "api_key_not_configured", "generation_failed", "api_connection_failed",
+    "api_request_timeout", "api_authentication_failed", "api_permission_denied",
+    "api_quota_exhausted", "api_rate_limited", "api_model_unavailable",
+    "api_request_rejected", "api_service_error", "invalid_model_output",
+    "generation_event_loop_closed", "generation_runtime_error",
+})
+
 
 class GenerationUnavailable(Exception):
     """Only static reason codes escape this module; never raw provider errors."""
+
+
+def _failure_reason(error: Exception) -> str:
+    if isinstance(error, APITimeoutError):
+        return "api_request_timeout"
+    if isinstance(error, APIConnectionError):
+        return "api_connection_failed"
+    if isinstance(error, APIStatusError):
+        if error.status_code == 401:
+            return "api_authentication_failed"
+        if error.status_code == 403:
+            return "api_permission_denied"
+        if error.status_code == 404:
+            return "api_model_unavailable"
+        if error.status_code == 429:
+            return (
+                "api_quota_exhausted"
+                if error.code in {"credit_balance_exhausted", "insufficient_quota"}
+                else "api_rate_limited"
+            )
+        return "api_service_error" if error.status_code >= 500 else "api_request_rejected"
+    if isinstance(error, ValidationError):
+        return "invalid_model_output"
+    if isinstance(error, RuntimeError):
+        if "event loop is closed" in str(error).lower():
+            return "generation_event_loop_closed"
+        return "generation_runtime_error"
+    return "generation_failed"
 
 
 def _settings(path: Path = ENV_PATH) -> dict[str, str]:
@@ -71,5 +110,5 @@ def produce_views(source: dict, policy: Policy) -> dict:
 
     try:
         return asyncio.run(run())
-    except Exception:
-        raise GenerationUnavailable("generation_failed") from None
+    except Exception as error:
+        raise GenerationUnavailable(_failure_reason(error)) from None

@@ -11,6 +11,11 @@ const viewsPanel = document.querySelector("#views-panel");
 const generateButton = document.querySelector("#generate-button");
 const reviewerInput = document.querySelector("#reviewer-name");
 const generationStatus = document.querySelector("#generation-status");
+const releaseButton = document.querySelector("#release-button");
+const refuseButton = document.querySelector("#refuse-button");
+const refusalReason = document.querySelector("#refusal-reason");
+const reviewStatus = document.querySelector("#review-status");
+let currentGeneration = null;
 let dirty = false;
 let draftId = window.location.pathname.startsWith("/notes/")
   ? window.location.pathname.split("/")[2] : null;
@@ -43,13 +48,67 @@ const reasonText = {
   invalid_rules_file: "the reporting rules could not be validated",
   api_key_not_configured: "configure OPENAI_API_KEY in the local .env file",
   generation_failed: "generation was unavailable; the saved note is unchanged",
+  api_connection_failed: "the app could not connect to OpenAI; the saved note is unchanged",
+  api_request_timeout: "the OpenAI request timed out; the saved note is unchanged",
+  api_authentication_failed: "OpenAI rejected the API key; check the local .env file",
+  api_permission_denied: "the API key does not have permission for this request",
+  api_quota_exhausted: "the OpenAI project has no available API credit or quota",
+  api_rate_limited: "OpenAI rate limited this request; wait before trying again",
+  api_model_unavailable: "the configured OpenAI model is unavailable to this API key",
+  api_request_rejected: "OpenAI rejected the generation request",
+  api_service_error: "OpenAI returned a service error; try again later",
+  invalid_model_output: "the generated output did not match the required structure",
+  generation_event_loop_closed: "the generation runtime closed unexpectedly; restart the app",
+  generation_runtime_error: "the generation runtime failed; the saved note is unchanged",
+  generation_not_ready: "only held, valid views can be reviewed",
+  already_reviewed: "this output already has a final review decision",
+  newer_generation_exists: "reopen the latest generated views before reviewing",
+  refusal_reason_required: "enter a refusal reason",
+  refusal_reason_too_long: "keep the reason within 1,000 characters",
+  note_already_released: "this note has already been released and counted",
+  rules_changed: "the reporting rules changed; generate fresh views",
+  stale_generation: "the saved note changed; generate fresh views",
+  generated_content_changed: "the generated content does not match its ledger record",
+  reporting_period_mismatch: "the reporting month does not match the saved session date",
 };
 
+function renderFunderView(view) {
+  const summary = document.querySelector("#funder-view");
+  summary.replaceChildren();
+  const period = /^(\d{4})-(0[1-9]|1[0-2])$/.exec(view.reporting_period || "");
+  const reportingPeriod = period
+    ? new Intl.DateTimeFormat("en", { month: "long", year: "numeric", timeZone: "UTC" })
+        .format(new Date(Date.UTC(Number(period[1]), Number(period[2]) - 1, 1)))
+    : "Not recorded";
+  const languages = { en: "English", es: "Spanish", ht: "Haitian Creole", unknown: "Not recorded" };
+  const entries = [
+    ["Reporting period", reportingPeriod],
+    ["Service", view.service_type === "counseling" ? "Counseling" : "Not recorded"],
+    ["Sessions", view.session_count],
+    ["Language", languages[view.language] || "Not recorded"],
+    ["Service area", view.service_area === "unknown" ? "Not recorded" : view.service_area],
+  ];
+  for (const [label, value] of entries) {
+    const row = document.createElement("div");
+    const term = document.createElement("dt");
+    const description = document.createElement("dd");
+    term.textContent = label;
+    description.textContent = value;
+    row.append(term, description);
+    summary.append(row);
+  }
+}
+
 function renderGeneration(result) {
+  generationStatus.dataset.state = result?.status || "";
+  currentGeneration = result;
   const list = document.querySelector("#rule-checks");
   const output = document.querySelector("#generated-views");
   list.replaceChildren();
   output.hidden = true;
+  document.querySelector("#review-controls").hidden = true;
+  document.querySelector("#review-receipt").textContent = "";
+  reviewStatus.textContent = "";
   if (!result) {
     generationStatus.textContent = "";
     return;
@@ -65,20 +124,29 @@ function renderGeneration(result) {
     generationStatus.textContent = `BLOCKED — ${failures.join(", ")}. Decision recorded in the ledger.`;
   } else if (result.status === "ERROR") {
     generationStatus.textContent = `ERROR — ${reasonText[result.reason_codes.generation] || "Generation is unavailable."}. Decision recorded in the ledger.`;
+  } else if (result.status === "RELEASED") {
+    generationStatus.textContent = "RELEASED — approved for reporting and included in quarterly totals.";
+  } else if (result.status === "REFUSED") {
+    generationStatus.textContent = "REFUSED — review decision recorded in the ledger.";
   } else {
     generationStatus.textContent = "READY FOR REVIEW — views held locally. Decision recorded in the ledger.";
   }
   for (const [name, check] of Object.entries(result.checks)) {
     const item = document.createElement("li");
+    item.dataset.state = check;
     const reason = reasonText[result.reason_codes[name]];
-    item.textContent = `${name}: ${check}${reason ? ` — ${reason}` : ""}${name === "release_gate" && check === "PASS" ? " — held locally for review" : ""}`;
+    item.textContent = `${name}: ${check}${reason ? ` — ${reason}` : ""}${name === "release_gate" && check === "PASS" && result.status === "READY_FOR_REVIEW" ? " — held locally for review" : ""}`;
     item.classList.toggle("fail", check === "FAIL");
     list.append(item);
   }
-  if (result.status === "READY_FOR_REVIEW") {
+  if (["READY_FOR_REVIEW", "RELEASED", "REFUSED"].includes(result.status)) {
     document.querySelector("#internal-note").textContent = result.internal_note;
-    document.querySelector("#funder-view").textContent = JSON.stringify(result.funder_view, null, 2);
+    renderFunderView(result.funder_view);
     output.hidden = false;
+    document.querySelector("#review-controls").hidden = result.status !== "READY_FOR_REVIEW";
+    if (result.reviewed_at) {
+      document.querySelector("#review-receipt").textContent = `Reviewed by ${result.reviewer_name} on ${new Date(result.reviewed_at).toLocaleString()}${result.review_reason ? ` — ${result.review_reason}` : ""}${result.is_current === false ? ". This is the reviewed snapshot; the note or rules have since changed." : ""}`;
+    }
   }
 }
 
@@ -151,7 +219,52 @@ fields.addEventListener("input", () => {
   document.querySelector("#generated-views").hidden = true;
   generationStatus.textContent = "Save your changes before generating views.";
   document.querySelector("#rule-checks").replaceChildren();
+  reviewStatus.textContent = "";
 });
+
+async function reviewViews(action) {
+  if (dirty || currentGeneration?.status !== "READY_FOR_REVIEW") return;
+  reviewStatus.classList.add("error");
+  reviewStatus.dataset.state = "ERROR";
+  if (!reviewerInput.value.trim()) {
+    reviewStatus.textContent = "Enter the reviewing counselor's name before releasing or refusing.";
+    return;
+  }
+  if (action === "refuse" && !refusalReason.value.trim()) {
+    reviewStatus.textContent = "Enter a refusal reason.";
+    return;
+  }
+  const identifier = currentGeneration.id;
+  releaseButton.disabled = refuseButton.disabled = generateButton.disabled = true;
+  reviewerInput.disabled = refusalReason.disabled = fields.disabled = true;
+  reviewStatus.classList.remove("error");
+  reviewStatus.dataset.state = "STARTED";
+  reviewStatus.textContent = "Recording review…";
+  try {
+    const result = await responseData(await fetch(`/api/generations/${encodeURIComponent(identifier)}/${action}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reviewer_name: reviewerInput.value, reason: action === "refuse" ? refusalReason.value : "" }),
+    }));
+    if (result.status === "BLOCKED") {
+      reviewStatus.dataset.state = "BLOCKED";
+      reviewStatus.textContent = `BLOCKED — ${result.failed_rules.map(name => `${name}: ${reasonText[result.reason_codes[name]] || result.reason_codes[name]}`).join("; ")}. Recorded in the ledger.`;
+      reviewStatus.classList.add("error");
+    } else {
+      refusalReason.value = "";
+      await loadGeneration();
+    }
+  } catch (error) {
+    reviewStatus.textContent = error.message === "Failed to fetch" ? "Could not reach the app. Reopen this note to check its review status before retrying." : error.message;
+    reviewStatus.dataset.state = "ERROR";
+    reviewStatus.classList.add("error");
+  } finally {
+    releaseButton.disabled = refuseButton.disabled = generateButton.disabled = false;
+    reviewerInput.disabled = refusalReason.disabled = fields.disabled = false;
+  }
+}
+
+releaseButton.addEventListener("click", () => reviewViews("release"));
+refuseButton.addEventListener("click", () => reviewViews("refuse"));
 
 generateButton.addEventListener("click", async () => {
   if (!draftId || dirty) return;
@@ -159,6 +272,7 @@ generateButton.addEventListener("click", async () => {
   reviewerInput.disabled = true;
   fields.disabled = true;
   generationStatus.classList.remove("error");
+  generationStatus.dataset.state = "STARTED";
   generationStatus.textContent = "Checking rules and generating views…";
   document.querySelector("#generated-views").hidden = true;
   document.querySelector("#rule-checks").replaceChildren();
@@ -170,6 +284,7 @@ generateButton.addEventListener("click", async () => {
     renderGeneration(result);
   } catch (error) {
     generationStatus.textContent = error.message === "Failed to fetch" ? "Could not reach the app. Reopen this note to check its latest decision before retrying." : error.message;
+    generationStatus.dataset.state = "ERROR";
     generationStatus.classList.add("error");
   } finally {
     generateButton.disabled = false;

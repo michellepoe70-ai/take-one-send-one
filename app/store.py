@@ -45,6 +45,10 @@ class DraftNotFoundError(Exception):
     pass
 
 
+class GenerationNotFoundError(Exception):
+    pass
+
+
 def _canonical(value: dict) -> bytes:
     return json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -74,6 +78,7 @@ def verify_ledger(path: Path) -> Chain:
         "generation_id", "status", "checks", "failed_rules", "reason_codes",
         "rules_hash", "output_hash", "reviewer_name",
     }
+    review_fields = {"reason", "released_funder_hash"}
     with path.open("rb") as ledger:
         for sequence, line in enumerate(ledger, start=1):
             try:
@@ -82,12 +87,16 @@ def verify_ledger(path: Path) -> Chain:
                     raise LedgerIntegrityError("Invalid ledger structure.")
                 version = row.get("version")
                 required = base_fields if version == 1 else base_fields | generation_fields
+                if version in {3, 4}:
+                    required |= review_fields
+                if version == 4:
+                    required |= {"released_funder_view"}
                 if (
                     not line.endswith(b"\n")
                     or not isinstance(row, dict)
                     or set(row) != required
                     or type(row["version"]) is not int
-                    or row["version"] not in {1, 2}
+                    or row["version"] not in {1, 2, 3, 4}
                     or type(row["sequence"]) is not int
                     or row["sequence"] != sequence
                     or row["previous_hash"] != previous
@@ -99,8 +108,20 @@ def verify_ledger(path: Path) -> Chain:
                     if row["action"] not in {"draft.create.requested", "draft.update.requested"}:
                         raise LedgerIntegrityError("Invalid draft action.")
                 elif (
-                    row["action"] != "views.generate"
-                    or row["status"] not in {"STARTED", "READY_FOR_REVIEW", "BLOCKED", "ERROR"}
+                    (version == 2 and (
+                        row["action"] != "views.generate"
+                        or row["status"] not in {"STARTED", "READY_FOR_REVIEW", "BLOCKED", "ERROR"}
+                    ))
+                    or (version in {3, 4} and (
+                        row["action"] not in {"views.release", "views.refuse"}
+                        or row["status"] not in {"RELEASED", "REFUSED", "BLOCKED"}
+                        or not isinstance(row["reason"], str)
+                        or (row["status"] == "REFUSED" and not row["reason"].strip())
+                        or (row["status"] == "RELEASED" and row["action"] != "views.release")
+                        or (row["status"] == "REFUSED" and row["action"] != "views.refuse")
+                        or not isinstance(row["released_funder_hash"], str)
+                        or len(row["released_funder_hash"]) != 64
+                    ))
                     or not isinstance(row["checks"], dict) or set(row["checks"]) != set(RULE_NAMES)
                     or any(value not in {"PASS", "FAIL", "NOT_EVALUATED"} for value in row["checks"].values())
                     or row["failed_rules"] != [name for name in RULE_NAMES if row["checks"][name] == "FAIL"]
@@ -111,6 +132,15 @@ def verify_ledger(path: Path) -> Chain:
                     or len(row["rules_hash"]) != 64 or len(row["output_hash"]) != 64
                 ):
                     raise LedgerIntegrityError("Invalid generation audit row.")
+                if version in {3, 4} and row["status"] == "RELEASED" and any(value != "PASS" for value in row["checks"].values()):
+                    raise LedgerIntegrityError("A release must pass every rule.")
+                if version == 4:
+                    funder = row["released_funder_view"]
+                    if row["status"] == "RELEASED":
+                        if not isinstance(funder, dict) or row["released_funder_hash"] != digest(funder):
+                            raise LedgerIntegrityError("Released ledger content failed verification.")
+                    elif funder is not None:
+                        raise LedgerIntegrityError("Only a release may contain a funder snapshot.")
                 recorded = row.pop("hash")
                 calculated = hashlib.sha256(_canonical(row)).hexdigest()
                 if not hmac.compare_digest(recorded, calculated):
@@ -121,6 +151,17 @@ def verify_ledger(path: Path) -> Chain:
             hashes.add(recorded)
             count = sequence
     return Chain(previous, count, frozenset(hashes))
+
+
+def _verified_chain(store, connection) -> Chain:
+    chain = verify_ledger(store.ledger_path)
+    for saved in connection.execute(
+        "SELECT ledger_hash FROM drafts UNION ALL SELECT ledger_hash FROM generations "
+        "UNION ALL SELECT ledger_hash FROM reviews"
+    ):
+        if saved["ledger_hash"] not in chain.hashes:
+            raise LedgerIntegrityError("A saved record has a missing ledger row.")
+    return chain
 
 
 def _append_ledger(path: Path, row: dict) -> None:
@@ -175,6 +216,23 @@ class Store:
                     created_at TEXT NOT NULL
                 )"""
             )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS reviews (
+                    id TEXT PRIMARY KEY,
+                    generation_id TEXT NOT NULL UNIQUE,
+                    draft_id TEXT NOT NULL,
+                    decision TEXT NOT NULL CHECK (decision IN ('RELEASED', 'REFUSED')),
+                    reviewer_name TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    funder_snapshot TEXT,
+                    ledger_hash TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL
+                )"""
+            )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS one_release_per_note "
+                "ON reviews(draft_id) WHERE decision = 'RELEASED'"
+            )
 
     def list_drafts(self) -> list[dict]:
         with closing(self.connect()) as connection:
@@ -201,6 +259,9 @@ class Store:
                 "SELECT * FROM generations WHERE draft_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
                 (draft_id,),
             ).fetchone()
+            review = connection.execute(
+                "SELECT * FROM reviews WHERE generation_id = ?", (row["id"],)
+            ).fetchone() if row is not None else None
         if row is None:
             return None
         result = dict(row)
@@ -211,16 +272,68 @@ class Store:
         except (OSError, ValueError, TypeError, KeyError):
             current_policy_hash = None
         source = {key: draft[key] for key in ("client_reference", "session_date", "note")}
-        if result["source_hash"] != digest(source) or result["rules_hash"] != current_policy_hash:
+        result["is_current"] = result["source_hash"] == digest(source) and result["rules_hash"] == current_policy_hash
+        if review is not None:
+            result.update(
+                status=review["decision"], reviewer_name=review["reviewer_name"],
+                review_reason=review["reason"], reviewed_at=review["created_at"],
+                review_ledger_hash=review["ledger_hash"],
+            )
+        elif not result["is_current"]:
             result.update(status="STALE", internal_note=None, funder_view=None)
         result["failed_rules"] = [name for name in RULE_NAMES if result["checks"][name] == "FAIL"]
         return result
+
+    def ledger_rows(self) -> dict:
+        # The same writer lock gives readers one complete, verified ledger snapshot.
+        with closing(self.connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            chain = _verified_chain(self, connection)
+            rows = []
+            if self.ledger_path.exists():
+                with self.ledger_path.open(encoding="utf-8") as ledger:
+                    rows = [json.loads(line) for line in ledger]
+            return {"rows": rows, "count": chain.length, "head_hash": chain.head}
+
+    def quarterly_totals(self, year: int, quarter: int) -> dict:
+        if not 1 <= year <= 9999 or not 1 <= quarter <= 4:
+            raise ValueError("Choose a valid year and quarter.")
+        count = sessions = 0
+        with closing(self.connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            _verified_chain(self, connection)
+            by_hash = {}
+            if self.ledger_path.exists():
+                with self.ledger_path.open(encoding="utf-8") as ledger:
+                    by_hash = {row["hash"]: row for row in (json.loads(line) for line in ledger)}
+            for review in connection.execute("SELECT * FROM reviews WHERE decision = 'RELEASED'"):
+                try:
+                    row = by_hash[review["ledger_hash"]]
+                    saved_funder = json.loads(review["funder_snapshot"])
+                    funder = row["released_funder_view"] if row["version"] == 4 else saved_funder
+                    if (
+                        row["status"] != "RELEASED" or row["action"] != "views.release"
+                        or row["generation_id"] != review["generation_id"]
+                        or row["draft_id"] != review["draft_id"]
+                        or row["released_funder_hash"] != digest(funder)
+                        or digest(saved_funder) != digest(funder)
+                        or type(funder["session_count"]) is not int
+                        or not 0 <= funder["session_count"] <= 1
+                    ):
+                        raise LedgerIntegrityError("A released snapshot failed verification.")
+                    period = date.fromisoformat(funder["reporting_period"] + "-01")
+                except (KeyError, TypeError, ValueError) as error:
+                    raise LedgerIntegrityError("Invalid released snapshot.") from error
+                if period.year == year and (period.month - 1) // 3 + 1 == quarter:
+                    count += 1
+                    sessions += funder["session_count"]
+        return {"year": year, "quarter": quarter, "released_rows": count, "session_count": sessions}
 
 
 def gate(
     store: Store, draft: DraftInput | None = None, draft_id: str | None = None, *,
     action: str = "save", reviewer_name: str = "", release_requested: bool = False,
-    generator=None,
+    generator=None, generation_id: str | None = None, reason: str = "",
 ) -> dict:
     """All draft mutations: lock, verify, durably log intent, then change SQLite.
 
@@ -228,7 +341,7 @@ def gate(
     data. Holding it until commit also serializes ledger appends across workers.
     A database failure after logging leaves a valid request row in the ledger.
     """
-    if action not in {"save", "generate"}:
+    if action not in {"save", "generate", "release", "refuse"}:
         raise ValueError("Unknown gate action.")
     if action == "save" and draft is None:
         raise ValueError("A draft is required for saving.")
@@ -236,6 +349,14 @@ def gate(
     with closing(store.connect()) as connection, connection:
         connection.execute("BEGIN IMMEDIATE")
         now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+        generation = None
+        if action in {"release", "refuse"}:
+            generation = connection.execute(
+                "SELECT * FROM generations WHERE id = ?", (generation_id,)
+            ).fetchone()
+            if generation is None:
+                raise GenerationNotFoundError()
+            draft_id = generation["draft_id"]
         existing = None
         if draft_id is not None:
             existing = connection.execute(
@@ -244,10 +365,117 @@ def gate(
             if existing is None:
                 raise DraftNotFoundError()
 
-        chain = verify_ledger(store.ledger_path)
-        for saved in connection.execute("SELECT ledger_hash FROM drafts UNION ALL SELECT ledger_hash FROM generations"):
-            if saved["ledger_hash"] not in chain.hashes:
-                raise LedgerIntegrityError("A saved draft has a missing ledger row.")
+        chain = _verified_chain(store, connection)
+
+        if action in {"release", "refuse"}:
+            checks = {name: "NOT_EVALUATED" for name in RULE_NAMES}
+            reasons = {}
+            reviewer_name = reviewer_name.strip()
+            reason = reason.strip() if action == "refuse" else ""
+            checks["named_human"] = "PASS" if is_named_human(reviewer_name) else "FAIL"
+            if checks["named_human"] == "FAIL":
+                reasons["named_human"] = "named_reviewer_required"
+            prior = connection.execute("SELECT id FROM reviews WHERE generation_id = ?", (generation_id,)).fetchone()
+            latest = connection.execute(
+                "SELECT id FROM generations WHERE draft_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                (draft_id,),
+            ).fetchone()
+            state_error = None
+            if generation["status"] != "READY_FOR_REVIEW":
+                state_error = "generation_not_ready"
+            elif prior is not None:
+                state_error = "already_reviewed"
+            elif latest["id"] != generation_id:
+                state_error = "newer_generation_exists"
+            elif action == "refuse" and not reason:
+                state_error = "refusal_reason_required"
+            elif action == "refuse" and len(reason) > 1000:
+                state_error = "refusal_reason_too_long"
+            elif action == "release" and connection.execute(
+                "SELECT id FROM reviews WHERE draft_id = ? AND decision = 'RELEASED'", (draft_id,)
+            ).fetchone() is not None:
+                state_error = "note_already_released"
+            checks["release_gate"] = "FAIL" if state_error else "PASS"
+            if state_error:
+                reasons["release_gate"] = state_error
+
+            funder = original = None
+            if action == "release":
+                source = {key: existing[key] for key in ("client_reference", "session_date", "note")}
+                try:
+                    funder = json.loads(generation["funder_view"]) if generation["funder_view"] else None
+                except (ValueError, TypeError):
+                    funder = None
+                try:
+                    policy = load_policy(store.rules_path)
+                    checks["allowed_fields"] = "PASS" if isinstance(funder, dict) and set(funder) == set(policy.schema["properties"]) else "FAIL"
+                    if checks["allowed_fields"] == "FAIL":
+                        reasons["allowed_fields"] = "unexpected_or_missing_fields"
+                    try:
+                        policy.funder_model.model_validate(funder)
+                        checks["no_narrative"] = "PASS"
+                    except (ValidationError, TypeError, ValueError):
+                        checks["no_narrative"] = "FAIL"
+                        reasons["no_narrative"] = "unconstrained_or_invalid_funder_value"
+                    if generation["rules_hash"] != policy.hash and not state_error:
+                        state_error = "rules_changed"
+                except (OSError, ValueError, TypeError, KeyError):
+                    checks["allowed_fields"] = "FAIL"
+                    reasons["allowed_fields"] = "invalid_rules_file"
+                identifiers = requests_client_list(source["note"]) or contains_identifiers(funder, source["client_reference"])
+                checks["no_identifiers"] = "FAIL" if identifiers else "PASS"
+                if identifiers:
+                    reasons["no_identifiers"] = "identifier_in_funder_view"
+                original = None
+                with store.ledger_path.open(encoding="utf-8") as ledger:
+                    original = next((json.loads(line) for line in ledger if json.loads(line)["hash"] == generation["ledger_hash"]), None)
+                content_hash = digest({"internal_note": generation["internal_note"], "funder_view": funder})
+                if generation["source_hash"] != digest(source) and not state_error:
+                    state_error = "stale_generation"
+                if isinstance(funder, dict) and funder.get("reporting_period") != source["session_date"][:7] and not state_error:
+                    state_error = "reporting_period_mismatch"
+                if (
+                    original is None or original.get("status") != "READY_FOR_REVIEW"
+                    or original.get("output_hash") != content_hash
+                    or original.get("payload_hash") != generation["source_hash"]
+                    or original.get("rules_hash") != generation["rules_hash"]
+                    or original.get("generation_id") != generation_id
+                    or original.get("draft_id") != draft_id
+                ) and not state_error:
+                    state_error = "generated_content_changed"
+                if state_error:
+                    checks["release_gate"] = "FAIL"
+                    reasons["release_gate"] = state_error
+
+            failed = [name for name in RULE_NAMES if checks[name] == "FAIL"]
+            status = "BLOCKED" if failed else ("RELEASED" if action == "release" else "REFUSED")
+            row = {
+                "version": 4, "sequence": chain.length + 1, "event_id": str(uuid4()),
+                "timestamp": now, "action": "views." + action, "draft_id": draft_id,
+                "payload_hash": generation["source_hash"], "previous_hash": chain.head,
+                "generation_id": generation_id, "status": status, "checks": checks,
+                "failed_rules": failed, "reason_codes": reasons,
+                "rules_hash": generation["rules_hash"],
+                "output_hash": original.get("output_hash", GENESIS_HASH) if action == "release" and original else GENESIS_HASH,
+                "reviewer_name": reviewer_name, "reason": reason,
+                "released_funder_hash": digest(funder) if status == "RELEASED" else GENESIS_HASH,
+                "released_funder_view": funder if status == "RELEASED" else None,
+            }
+            row["hash"] = hashlib.sha256(_canonical(row)).hexdigest()
+            _append_ledger(store.ledger_path, row)
+            if status != "BLOCKED":
+                connection.execute(
+                    """INSERT INTO reviews
+                       (id, generation_id, draft_id, decision, reviewer_name, reason,
+                        funder_snapshot, ledger_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (str(uuid4()), generation_id, draft_id, status, reviewer_name, reason,
+                     json.dumps(funder, ensure_ascii=False) if status == "RELEASED" else None,
+                     row["hash"], now),
+                )
+            connection.commit()
+            return {"status": status, "generation_id": generation_id, "draft_id": draft_id,
+                    "reviewer_name": reviewer_name, "reason": reason, "checks": checks,
+                    "failed_rules": failed, "reason_codes": reasons, "ledger_hash": row["hash"]}
 
         if action == "generate":
             if existing is None:
@@ -309,10 +537,10 @@ def gate(
                         generator = produce_views
                     candidate = generator(source, policy)
                 except Exception as error:
-                    from app.generation import GenerationUnavailable
+                    from app.generation import GENERATION_REASON_CODES, GenerationUnavailable
                     reasons["generation"] = (
                         str(error) if isinstance(error, GenerationUnavailable)
-                        and str(error) in {"api_key_not_configured", "generation_failed"}
+                        and str(error) in GENERATION_REASON_CODES
                         else "generation_failed"
                     )
                     status = "ERROR"
