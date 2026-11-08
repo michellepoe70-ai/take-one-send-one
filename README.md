@@ -1,4 +1,6 @@
-# Take One, Send One
+# Write Once
+
+Repository: `take-one-send-one` (the project's working name; submitted to the DevDay Exchange Codex Hackathon as **Write Once**).
 
 A hackathon prototype for Tidepath Family Alliance to help counselors write session
 notes once and prepare funder reports containing only the required information.
