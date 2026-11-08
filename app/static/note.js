@@ -35,11 +35,6 @@ async function responseData(response) {
   return body;
 }
 
-function setEditTitle() {
-  document.querySelector("#page-title").textContent = "Edit draft";
-  document.title = "Edit draft | Take One, Send One";
-}
-
 const reasonText = {
   client_list_by_diagnosis_requested: "client list by diagnosis requested",
   identifier_in_funder_view: "identifier found in the funder view",
@@ -180,7 +175,6 @@ async function loadDraft() {
     referenceInput.value = draft.client_reference;
     dateInput.value = draft.session_date;
     noteInput.value = draft.note;
-    setEditTitle();
     fields.disabled = false;
     showStatus("");
     await loadGeneration();
@@ -207,7 +201,6 @@ form.addEventListener("submit", async (event) => {
     }));
     draftId = draft.id;
     window.history.replaceState(null, "", `/notes/${draftId}`);
-    setEditTitle();
     dirty = false;
     showStatus("Draft saved.");
     await loadGeneration();
