@@ -98,7 +98,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         except DraftNotFoundError:
             raise HTTPException(404, "Draft not found.") from None
         except ReviewerNameRequiredError:
-            raise HTTPException(422, "Enter the reviewing counselor's name before opening this draft.") from None
+            raise HTTPException(422, "Enter the reviewing counselor’s name to open this note.") from None
         except LedgerIntegrityError:
             raise HTTPException(503, "Ledger verification failed. Draft was not opened.") from None
         except (OSError, sqlite3.Error):

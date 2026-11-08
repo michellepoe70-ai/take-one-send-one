@@ -26,6 +26,11 @@
       <p class="intro">Session Notes, Review, Release and Generate Funder View</p>
       <form id="note-form">
         <div class="section-heading form-heading"><div><p class="section-label">Session record</p><h2>Session details</h2></div><span class="soft-badge">Local draft</span></div>
+        <p id="reviewer-banner" class="reviewer-banner" role="status" aria-live="polite" hidden>Enter the reviewing counselor’s name to open this note.</p>
+        <div class="reviewer-field">
+          <label for="reviewer-name">Reviewing counselor</label>
+          <input id="reviewer-name" maxlength="100" autocomplete="off" placeholder="Enter the human reviewer's name">
+        </div>
         <fieldset id="note-fields">
           <div class="form-row">
             <div><label for="client-reference">Client reference</label><input id="client-reference" name="client_reference" maxlength="100" placeholder="Example: DEMO-001" autocomplete="off" required></div>
@@ -40,8 +45,6 @@
       <section id="views-panel" class="panel views-panel" aria-labelledby="views-heading" hidden>
         <p class="section-label">Review and Generate Internal and Funder Note</p><h2 id="views-heading">Internal note &amp; funder view</h2>
         <p>Generate both views from this saved note. The funder view uses the demo reporting rules and stays local for review.</p>
-        <label for="reviewer-name">Reviewing counselor</label>
-        <input id="reviewer-name" maxlength="100" autocomplete="off" placeholder="Enter the human reviewer's name">
         <button id="generate-button" type="button">Generate views</button>
         <p id="generation-status" class="status" role="status" aria-live="polite"></p>
         <ul id="rule-checks" class="rule-checks" aria-label="Rule checks"></ul>

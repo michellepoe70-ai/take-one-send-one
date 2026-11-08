@@ -72,6 +72,8 @@ form:not(.quarterly-form), .panel { border: 1px solid var(--line); border-radius
 .section-heading h2 { margin: 0; }
 .section-heading .section-label { margin-bottom: 6px; font-size: 8px; }
 .form-heading { margin-bottom: 25px; padding-bottom: 22px; border-bottom: 1px solid #e8ecf0; }
+.reviewer-banner { margin: 0 0 14px; padding: 14px 16px; border: 1px solid var(--ready-border); border-radius: 8px; background: var(--gold-light); color: var(--primary); font-size: 14px; line-height: 1.6; }
+.reviewer-field input { max-width: 420px; }
 .panel-description { margin: 12px 0 0; color: var(--muted); font-size: 13px; line-height: 1.7; }
 .report-panel { background: linear-gradient(115deg, #fff 65%, #f2f6fa); }
 label { font-size: 12px; font-weight: 650; color: #495461; margin-bottom: 8px; }

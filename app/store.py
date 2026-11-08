@@ -402,7 +402,7 @@ def gate(
         if action == "view":
             reviewer_name = reviewer_name.strip()
             if not is_named_human(reviewer_name):
-                raise ReviewerNameRequiredError("Enter the reviewing counselor's name before opening this draft.")
+                raise ReviewerNameRequiredError("Enter the reviewing counselor’s name to open this note.")
             row = {
                 "version": 6, "sequence": chain.length + 1, "event_id": str(uuid4()),
                 "event": "VIEWED", "draft_id": draft_id, "reviewer_name": reviewer_name,

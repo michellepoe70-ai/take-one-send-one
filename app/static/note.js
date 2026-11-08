@@ -10,6 +10,7 @@ const noteInput = document.querySelector("#note");
 const viewsPanel = document.querySelector("#views-panel");
 const generateButton = document.querySelector("#generate-button");
 const reviewerInput = document.querySelector("#reviewer-name");
+const reviewerBanner = document.querySelector("#reviewer-banner");
 const generationStatus = document.querySelector("#generation-status");
 const releaseButton = document.querySelector("#release-button");
 const refuseButton = document.querySelector("#refuse-button");
@@ -185,7 +186,8 @@ async function loadDraft() {
   viewsPanel.hidden = false;
   generateButton.disabled = true;
   if (!reviewerInput.value.trim()) {
-    showStatus("Enter the reviewing counselor's name below and press Tab to open this draft.");
+    reviewerBanner.hidden = false;
+    showStatus("");
     reviewerInput.focus();
     return;
   }
@@ -198,6 +200,7 @@ async function loadDraft() {
     referenceInput.value = draft.client_reference;
     dateInput.value = draft.session_date;
     noteInput.value = draft.note;
+    reviewerBanner.hidden = true;
     draftOpened = true;
     rememberReviewer();
     fields.disabled = false;

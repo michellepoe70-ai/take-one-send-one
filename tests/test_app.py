@@ -166,7 +166,9 @@ class AppTests(unittest.TestCase):
         self.assertNotIn(saved["note"], json.dumps(failure))
         for name in ("", "AI"):
             missing_name = f"/api/drafts/{saved['id']}?" + urllib.parse.urlencode({"reviewer_name": name})
-            self.assertEqual(self.request(missing_name)[0], 422)
+            status, _, error = self.request(missing_name)
+            self.assertEqual(status, 422)
+            self.assertEqual(error, {"detail": "Enter the reviewing counselor’s name to open this note."})
         self.assertEqual(len([row for row in self.store.ledger_rows()["rows"] if row.get("event") == "VIEWED"]), 1)
 
     def test_viewed_events_preserve_mixed_hash_chain_and_released_status(self):
