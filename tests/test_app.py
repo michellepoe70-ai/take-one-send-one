@@ -169,13 +169,14 @@ class AppTests(unittest.TestCase):
         status, _, decision = self.request(f"/api/generations/{released['id']}/release", "POST", {"reviewer_name": "Demo Reviewer"})
         self.assertEqual(status, 200)
         self.assertEqual(decision["status"], "RELEASED")
-        status, _, decision = self.request(f"/api/generations/{refused['id']}/refuse", "POST", {"reviewer_name": "Demo Reviewer", "reason": "Revise this fictional output."})
+        status, _, decision = self.request(f"/api/generations/{refused['id']}/refuse", "POST", {"reviewer_name": "Demo Reviewer", "reason_code": "other", "reason": "Revise this fictional output."})
         self.assertEqual(decision["status"], "REFUSED")
         self.assertEqual(self.request(f"/api/drafts/{released_draft['id']}/generation")[2]["status"], "RELEASED")
         self.assertEqual(self.request(f"/api/drafts/{refused_draft['id']}/generation")[2]["review_reason"], "Revise this fictional output.")
         ledger = self.request("/api/ledger")[2]
         self.assertEqual(ledger["count"], 11)
         self.assertEqual(ledger["rows"][-1]["status"], "REFUSED")
+        self.assertEqual(ledger["rows"][-1]["reason_code"], "other")
         from test_generation import SAFE_OUTPUT
         self.assertEqual(ledger["rows"][-2]["released_funder_view"], SAFE_OUTPUT["funder_view"])
         self.assertIsNone(ledger["rows"][-1]["released_funder_view"])
@@ -192,6 +193,24 @@ class AppTests(unittest.TestCase):
         self.assertEqual(self.request(f"/api/generations/{uuid4()}/release", "POST", {"reviewer_name": "Demo Reviewer"})[0], 404)
         self.assertEqual(self.request(path + "/release", "POST", {"reviewer_name": "Demo Reviewer", "override": True})[0], 422)
         self.assertEqual(self.request("/api/quarterly?year=2026&quarter=5")[0], 422)
+
+    def test_unsafe_other_text_is_blocked_over_http_without_echoing_or_logging_it(self):
+        saved, generated = self.ready_generation()
+        private = "fictional.private@example.test"
+        status, _, result = self.request(f"/api/generations/{generated['id']}/refuse", "POST", {
+            "reviewer_name": "Demo Reviewer", "reason_code": "other", "reason": private,
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertEqual(result["checks"]["no_identifiers"], "FAIL")
+        self.assertNotIn(private, json.dumps(result))
+        self.assertNotIn(private, json.dumps(self.request("/api/ledger")[2]))
+        self.assertEqual(self.request(f"/api/drafts/{saved['id']}/generation")[2]["status"], "READY_FOR_REVIEW")
+        result = self.request(f"/api/generations/{generated['id']}/refuse", "POST", {
+            "reviewer_name": "Demo Reviewer", "reason_code": "duplicate",
+        })[2]
+        self.assertEqual(result["status"], "REFUSED")
+        self.assertEqual(self.request("/api/ledger")[2]["rows"][-1]["reason_code"], "duplicate")
 
     def test_ledger_and_quarterly_fail_closed_on_broken_chain(self):
         self.ready_generation()

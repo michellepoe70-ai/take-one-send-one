@@ -23,7 +23,7 @@
     <main>
       <p class="eyebrow">Care, captured once</p>
       <h1 id="page-title">New session note</h1>
-      <p class="intro">A thoughtful space for your session notes and human review.</p>
+      <p class="intro">Session Notes, Review, Release and Generate Funder View</p>
       <form id="note-form">
         <div class="section-heading form-heading"><div><p class="section-label">Session record</p><h2>Session details</h2></div><span class="soft-badge">Local draft</span></div>
         <fieldset id="note-fields">
@@ -51,7 +51,25 @@
           <p id="review-receipt"></p>
           <div id="review-controls" class="review-controls" hidden>
             <label for="refusal-reason">Refusal reason</label>
-            <textarea id="refusal-reason" rows="3" maxlength="1000" placeholder="Required when refusing; recorded in the ledger."></textarea>
+            <select id="refusal-reason">
+              <option value="">Select a refusal reason</option>
+              <option value="draft_inaccurate">Draft is inaccurate</option>
+              <option value="attendance_recorded_wrong">Attendance recorded incorrectly</option>
+              <option value="identifying_detail_present">Identifying detail present</option>
+              <option value="client_consent_not_on_file">Client consent not on file</option>
+              <option value="not_reportable_to_this_grant">Not reportable to this grant</option>
+              <option value="wrong_reporting_period">Wrong reporting period</option>
+              <option value="duplicate">Duplicate</option>
+              <option value="note_not_complete">Note not complete</option>
+              <option value="under_review">Under review</option>
+              <option value="safety_or_legal_hold">Safety or legal hold</option>
+              <option value="other">Other — see internal note for details</option>
+            </select>
+            <div id="refusal-other" hidden>
+              <label for="refusal-other-text">Other details (optional)</label>
+              <p id="refusal-other-hint" class="panel-description">Keep client-specific details in the internal note.</p>
+              <textarea id="refusal-other-text" rows="3" maxlength="1000" aria-describedby="refusal-other-hint" placeholder="A brief explanation without identifying details."></textarea>
+            </div>
             <div class="actions"><button id="release-button" type="button">Release</button><button id="refuse-button" type="button" class="secondary">Refuse</button><a href="/ledger">View ledger</a></div>
           </div>
         </div>

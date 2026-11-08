@@ -17,6 +17,7 @@ from app.policy import (
     DEFAULT_RULES_PATH, RULE_NAMES, contains_identifiers, digest, is_named_human,
     load_policy, requests_client_list,
 )
+from app.refusals import REFUSAL_REASONS
 
 
 GENESIS_HASH = "0" * 64
@@ -87,16 +88,18 @@ def verify_ledger(path: Path) -> Chain:
                     raise LedgerIntegrityError("Invalid ledger structure.")
                 version = row.get("version")
                 required = base_fields if version == 1 else base_fields | generation_fields
-                if version in {3, 4}:
+                if version in {3, 4, 5}:
                     required |= review_fields
-                if version == 4:
+                if version in {4, 5}:
                     required |= {"released_funder_view"}
+                if version == 5:
+                    required |= {"reason_code"}
                 if (
                     not line.endswith(b"\n")
                     or not isinstance(row, dict)
                     or set(row) != required
                     or type(row["version"]) is not int
-                    or row["version"] not in {1, 2, 3, 4}
+                    or row["version"] not in {1, 2, 3, 4, 5}
                     or type(row["sequence"]) is not int
                     or row["sequence"] != sequence
                     or row["previous_hash"] != previous
@@ -112,11 +115,11 @@ def verify_ledger(path: Path) -> Chain:
                         row["action"] != "views.generate"
                         or row["status"] not in {"STARTED", "READY_FOR_REVIEW", "BLOCKED", "ERROR"}
                     ))
-                    or (version in {3, 4} and (
+                    or (version in {3, 4, 5} and (
                         row["action"] not in {"views.release", "views.refuse"}
                         or row["status"] not in {"RELEASED", "REFUSED", "BLOCKED"}
                         or not isinstance(row["reason"], str)
-                        or (row["status"] == "REFUSED" and not row["reason"].strip())
+                        or (version in {3, 4} and row["status"] == "REFUSED" and not row["reason"].strip())
                         or (row["status"] == "RELEASED" and row["action"] != "views.release")
                         or (row["status"] == "REFUSED" and row["action"] != "views.refuse")
                         or not isinstance(row["released_funder_hash"], str)
@@ -132,15 +135,25 @@ def verify_ledger(path: Path) -> Chain:
                     or len(row["rules_hash"]) != 64 or len(row["output_hash"]) != 64
                 ):
                     raise LedgerIntegrityError("Invalid generation audit row.")
-                if version in {3, 4} and row["status"] == "RELEASED" and any(value != "PASS" for value in row["checks"].values()):
+                if version in {3, 4, 5} and row["status"] == "RELEASED" and any(value != "PASS" for value in row["checks"].values()):
                     raise LedgerIntegrityError("A release must pass every rule.")
-                if version == 4:
+                if version in {4, 5}:
                     funder = row["released_funder_view"]
                     if row["status"] == "RELEASED":
                         if not isinstance(funder, dict) or row["released_funder_hash"] != digest(funder):
                             raise LedgerIntegrityError("Released ledger content failed verification.")
                     elif funder is not None:
                         raise LedgerIntegrityError("Only a release may contain a funder snapshot.")
+                if version == 5:
+                    code = row["reason_code"]
+                    if (
+                        not isinstance(code, str) or (code and code not in REFUSAL_REASONS)
+                        or (row["status"] == "REFUSED" and code not in REFUSAL_REASONS)
+                        or (row["action"] == "views.release" and (code or row["reason"]))
+                        or (code != "other" and row["reason"])
+                        or (row["status"] == "REFUSED" and row["checks"]["no_identifiers"] != "PASS")
+                    ):
+                        raise LedgerIntegrityError("Invalid coded refusal.")
                 recorded = row.pop("hash")
                 calculated = hashlib.sha256(_canonical(row)).hexdigest()
                 if not hmac.compare_digest(recorded, calculated):
@@ -224,11 +237,14 @@ class Store:
                     decision TEXT NOT NULL CHECK (decision IN ('RELEASED', 'REFUSED')),
                     reviewer_name TEXT NOT NULL,
                     reason TEXT NOT NULL,
+                    reason_code TEXT NOT NULL DEFAULT '',
                     funder_snapshot TEXT,
                     ledger_hash TEXT NOT NULL UNIQUE,
                     created_at TEXT NOT NULL
                 )"""
             )
+            if "reason_code" not in {row["name"] for row in connection.execute("PRAGMA table_info(reviews)")}:
+                connection.execute("ALTER TABLE reviews ADD COLUMN reason_code TEXT NOT NULL DEFAULT ''")
             connection.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS one_release_per_note "
                 "ON reviews(draft_id) WHERE decision = 'RELEASED'"
@@ -276,7 +292,7 @@ class Store:
         if review is not None:
             result.update(
                 status=review["decision"], reviewer_name=review["reviewer_name"],
-                review_reason=review["reason"], reviewed_at=review["created_at"],
+                review_reason=review["reason"], review_reason_code=review["reason_code"], reviewed_at=review["created_at"],
                 review_ledger_hash=review["ledger_hash"],
             )
         elif not result["is_current"]:
@@ -310,7 +326,7 @@ class Store:
                 try:
                     row = by_hash[review["ledger_hash"]]
                     saved_funder = json.loads(review["funder_snapshot"])
-                    funder = row["released_funder_view"] if row["version"] == 4 else saved_funder
+                    funder = row["released_funder_view"] if row["version"] in {4, 5} else saved_funder
                     if (
                         row["status"] != "RELEASED" or row["action"] != "views.release"
                         or row["generation_id"] != review["generation_id"]
@@ -333,7 +349,7 @@ class Store:
 def gate(
     store: Store, draft: DraftInput | None = None, draft_id: str | None = None, *,
     action: str = "save", reviewer_name: str = "", release_requested: bool = False,
-    generator=None, generation_id: str | None = None, reason: str = "",
+    generator=None, generation_id: str | None = None, reason: str = "", reason_code: str = "",
 ) -> dict:
     """All draft mutations: lock, verify, durably log intent, then change SQLite.
 
@@ -371,7 +387,18 @@ def gate(
             checks = {name: "NOT_EVALUATED" for name in RULE_NAMES}
             reasons = {}
             reviewer_name = reviewer_name.strip()
-            reason = reason.strip() if action == "refuse" else ""
+            submitted_reason = reason.strip() if action == "refuse" else ""
+            submitted_code = reason_code.strip() if action == "refuse" else ""
+            reason_code = submitted_code if submitted_code in REFUSAL_REASONS else ""
+            unsafe_reason = action == "refuse" and contains_identifiers(submitted_reason, existing["client_reference"])
+            reason = (
+                submitted_reason if reason_code == "other" and not unsafe_reason
+                and len(submitted_reason) <= 1000 else ""
+            )
+            if action == "refuse":
+                checks["no_identifiers"] = "FAIL" if unsafe_reason else "PASS"
+                if unsafe_reason:
+                    reasons["no_identifiers"] = "identifier_in_refusal_reason"
             checks["named_human"] = "PASS" if is_named_human(reviewer_name) else "FAIL"
             if checks["named_human"] == "FAIL":
                 reasons["named_human"] = "named_reviewer_required"
@@ -387,10 +414,14 @@ def gate(
                 state_error = "already_reviewed"
             elif latest["id"] != generation_id:
                 state_error = "newer_generation_exists"
-            elif action == "refuse" and not reason:
+            elif action == "refuse" and not submitted_code:
                 state_error = "refusal_reason_required"
-            elif action == "refuse" and len(reason) > 1000:
+            elif action == "refuse" and submitted_code not in REFUSAL_REASONS:
+                state_error = "refusal_reason_invalid"
+            elif action == "refuse" and len(submitted_reason) > 1000:
                 state_error = "refusal_reason_too_long"
+            elif action == "refuse" and submitted_code != "other" and submitted_reason:
+                state_error = "refusal_details_only_for_other"
             elif action == "release" and connection.execute(
                 "SELECT id FROM reviews WHERE draft_id = ? AND decision = 'RELEASED'", (draft_id,)
             ).fetchone() is not None:
@@ -450,14 +481,14 @@ def gate(
             failed = [name for name in RULE_NAMES if checks[name] == "FAIL"]
             status = "BLOCKED" if failed else ("RELEASED" if action == "release" else "REFUSED")
             row = {
-                "version": 4, "sequence": chain.length + 1, "event_id": str(uuid4()),
+                "version": 5, "sequence": chain.length + 1, "event_id": str(uuid4()),
                 "timestamp": now, "action": "views." + action, "draft_id": draft_id,
                 "payload_hash": generation["source_hash"], "previous_hash": chain.head,
                 "generation_id": generation_id, "status": status, "checks": checks,
                 "failed_rules": failed, "reason_codes": reasons,
                 "rules_hash": generation["rules_hash"],
                 "output_hash": original.get("output_hash", GENESIS_HASH) if action == "release" and original else GENESIS_HASH,
-                "reviewer_name": reviewer_name, "reason": reason,
+                "reviewer_name": reviewer_name, "reason_code": reason_code, "reason": reason,
                 "released_funder_hash": digest(funder) if status == "RELEASED" else GENESIS_HASH,
                 "released_funder_view": funder if status == "RELEASED" else None,
             }
@@ -466,15 +497,15 @@ def gate(
             if status != "BLOCKED":
                 connection.execute(
                     """INSERT INTO reviews
-                       (id, generation_id, draft_id, decision, reviewer_name, reason,
-                        funder_snapshot, ledger_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (str(uuid4()), generation_id, draft_id, status, reviewer_name, reason,
+                       (id, generation_id, draft_id, decision, reviewer_name, reason_code, reason,
+                        funder_snapshot, ledger_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (str(uuid4()), generation_id, draft_id, status, reviewer_name, reason_code, reason,
                      json.dumps(funder, ensure_ascii=False) if status == "RELEASED" else None,
                      row["hash"], now),
                 )
             connection.commit()
             return {"status": status, "generation_id": generation_id, "draft_id": draft_id,
-                    "reviewer_name": reviewer_name, "reason": reason, "checks": checks,
+                    "reviewer_name": reviewer_name, "reason_code": reason_code, "reason": reason, "checks": checks,
                     "failed_rules": failed, "reason_codes": reasons, "ledger_hash": row["hash"]}
 
         if action == "generate":

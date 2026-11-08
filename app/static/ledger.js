@@ -47,7 +47,13 @@ async function loadLedger() {
       metadata.textContent = `${new Date(row.timestamp).toLocaleString()} · ${row.action}${row.reviewer_name ? ` · ${row.reviewer_name}` : ""}`;
       const decision = document.createElement("p");
       decision.className = "ledger-decision";
-      decision.textContent = row.reason ? `Reason: ${row.reason}` : (row.failed_rules?.length ? `Failed rules: ${row.failed_rules.join(", ")}` : "");
+      const refusalLabel = row.reason_code === "other" ? "Other — see internal note for details"
+        : row.reason_code?.replaceAll("_", " ");
+      const refusal = [refusalLabel, row.reason].filter(Boolean).join(": ");
+      decision.textContent = [
+        refusal ? `Reason: ${refusal}` : "",
+        row.failed_rules?.length ? `Failed rules: ${row.failed_rules.join(", ")}` : "",
+      ].filter(Boolean).join(" · ");
       item.append(header, metadata, decision);
       const hashes = document.createElement("div");
       hashes.className = "hash-grid";

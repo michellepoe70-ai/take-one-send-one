@@ -19,12 +19,6 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-The development environment prepared in this chat can also run it from this directory:
-
-```powershell
-..\..\work\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
-```
-
 Test: open <http://127.0.0.1:8000>, save a fictional note, open **Drafts**, reopen
 the note, edit it, save, and refresh to confirm the edit persisted.
 Stop the server with Ctrl+C.
@@ -59,10 +53,14 @@ Stop the server with Ctrl+C.
 - Version 3 review rows preserve the same chain and add the review reason and a
   hash of the released funder snapshot. Refusal reasons are reviewer-entered
   audit text; they are displayed on the internal Ledger page.
-- New version 4 review rows also contain `released_funder_view` on `RELEASED`
+- Version 4 and later review rows also contain `released_funder_view` on `RELEASED`
   decisions. This is the exact structured funder object, included in the row's
   hash and checked against `released_funder_hash`. Other review decisions store
   `null`. Earlier rows remain unchanged and verifiable.
+- New version 5 review rows add a fixed refusal `reason_code`. Only `other` may
+  contain optional text in `reason`. The same `no_identifiers` check screens that
+  text before any ledger append. A failed check records `BLOCKED` with the unsafe
+  text omitted from the ledger, response, and review table.
 
 ## Generate views from a saved note
 
@@ -106,14 +104,17 @@ makes older generated views `STALE` and hides them until regeneration.
 ## Release, Refuse, and quarterly totals
 
 On a `READY_FOR_REVIEW` result, enter the reviewing counselor's name and use
-**Release** or **Refuse**. Refuse also requires a brief reason of up to 1,000
-characters. Both operations pass through the same `gate()` and append and sync
+**Release** or **Refuse**. Refuse requires a reason from the coded dropdown.
+**Other — see internal note for details** allows optional text of up to 1,000
+characters, screened for identifiers before logging. Both operations pass through the same `gate()` and append and sync
 their ledger row before storing the review decision in SQLite.
 
 - Release records `RELEASED` and approves an immutable local funder snapshot for
   reporting. The gate rechecks the schema, identifier/narrative rules, named
   reviewer, source/policy hashes, reporting month, and original generated output.
-- Refuse records `REFUSED`, the reviewer, and the reason.
+- Refuse records `REFUSED`, the reviewer, and the selected code. Only safe Other
+  text is retained. The eleven fixed codes and display labels are defined in
+  `app/refusals.py`; arbitrary codes and text on non-Other reasons are blocked.
 - Blocked or failed generations cannot be released. Stale outputs must be
   regenerated before release. A generation can have only one final review
   decision, and a saved note can be released only once, preventing duplicate totals.
@@ -132,11 +133,11 @@ Release approves local reporting data; this app does not deliver it to a funder.
 
 ## Eight fictional demo notes
 
-From the project directory with the environment prepared in this chat:
+From the project directory:
 
 ```powershell
-..\..\work\.venv\Scripts\python.exe seed.py
-..\..\work\.venv\Scripts\python.exe seed.py --run-demo 3
+.\.venv\Scripts\python.exe seed.py
+.\.venv\Scripts\python.exe seed.py --run-demo 3
 ```
 
 The seed is idempotent: it adds eight `SEED-DEMO-01` through `SEED-DEMO-08`
@@ -157,13 +158,12 @@ appropriate approved infrastructure and review.
 
 ## Automated tests
 
-From this directory, using the environment prepared in this chat:
+From this directory:
 
 ```powershell
-..\..\work\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-For a fresh setup, replace that Python path with `.\.venv\Scripts\python.exe`.
 Tests use temporary data directories, Python's standard library, and Uvicorn.
 They cover HTTP create/read/update and generation, persistence, all five rules,
 ledger-before-database and ledger-before-model ordering, failed writes, tampering,
@@ -189,3 +189,9 @@ FastAPI, the approved Uvicorn server, and the OpenAI Agents SDK, plus their requ
 SQLite and the test tools come from Python's standard library.
 
 The SDK integration follows the official [OpenAI Agent definitions guide](https://developers.openai.com/api/docs/guides/agents/define-agents).
+
+## Credit
+
+Built by Michelle Poe, Integrity AI 2.0. The hold, release and ledger pattern
+shown here is the public shape of RHITL™ (patent pending); the production rule
+engine and ledger design are not part of this repository.

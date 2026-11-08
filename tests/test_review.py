@@ -11,6 +11,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from app.policy import digest, load_policy
+from app.refusals import REFUSAL_REASONS
 from app.store import DraftInput, GenerationNotFoundError, LedgerIntegrityError, Store, gate, verify_ledger
 from seed import SEED_NOTES
 from test_generation import SAFE_OUTPUT
@@ -40,10 +41,12 @@ class ReviewTests(unittest.TestCase):
         )
         return draft, generated
 
-    def review(self, action="release", generation=None, name=REVIEWER, reason=""):
+    def review(self, action="release", generation=None, name=REVIEWER, reason="", reason_code=None):
+        if reason_code is None:
+            reason_code = "other" if action == "refuse" and reason else ""
         return gate(
             self.store, action=action, generation_id=(generation or self.generated)["id"],
-            reviewer_name=name, reason=reason,
+            reviewer_name=name, reason=reason, reason_code=reason_code,
         )
 
     def test_release_is_append_only_and_survives_reopening(self):
@@ -59,7 +62,7 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(reopened["review_ledger_hash"], result["ledger_hash"])
         self.assertEqual(reopened["funder_view"], SAFE_OUTPUT["funder_view"])
         row = self.store.ledger_rows()["rows"][-1]
-        self.assertEqual(row["version"], 4)
+        self.assertEqual(row["version"], 5)
         self.assertEqual(row["released_funder_view"], SAFE_OUTPUT["funder_view"])
         self.assertEqual(row["released_funder_view"]["language"], "en")
         self.assertEqual(row["released_funder_view"]["reporting_period"], "2026-11")
@@ -79,6 +82,8 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(latest["status"], "REFUSED")
         row = self.store.ledger_rows()["rows"][-1]
         self.assertEqual(row["reason"], latest["review_reason"])
+        self.assertEqual(row["reason_code"], "other")
+        self.assertEqual(latest["review_reason_code"], "other")
         self.assertIsNone(row["released_funder_view"])
         self.assertEqual(self.store.quarterly_totals(2026, 4)["released_rows"], 0)
 
@@ -90,6 +95,61 @@ class ReviewTests(unittest.TestCase):
                 self.assertIn("named_human", result["failed_rules"])
                 self.assertIsNone(self.store.ledger_rows()["rows"][-1]["released_funder_view"])
         self.assertEqual(self.store.latest_generation(self.draft["id"])["status"], "READY_FOR_REVIEW")
+
+    def test_each_fixed_refusal_code_is_recorded_without_free_text(self):
+        for code in REFUSAL_REASONS:
+            with self.subTest(code=code):
+                draft, generated = self.make_ready()
+                result = self.review("refuse", generation=generated, reason_code=code)
+                self.assertEqual(result["status"], "REFUSED")
+                row = self.store.ledger_rows()["rows"][-1]
+                self.assertEqual(row["reason_code"], code)
+                self.assertEqual(row["reason"], "")
+                self.assertEqual(row["checks"]["no_identifiers"], "PASS")
+                self.assertEqual(self.store.latest_generation(draft["id"])["review_reason_code"], code)
+        self.assertEqual(self.store.quarterly_totals(2026, 4)["released_rows"], 0)
+
+    def test_unsafe_other_text_is_checked_before_append_and_never_stored(self):
+        from app.store import _append_ledger
+        private_values = (self.draft["client_reference"], "fictional.private@example.test", "305-555-0199", "ICD-10 F99")
+        for private in private_values:
+            with self.subTest(kind=private_values.index(private)):
+                def inspect_append(path, row):
+                    self.assertEqual(row["status"], "BLOCKED")
+                    self.assertEqual(row["checks"]["no_identifiers"], "FAIL")
+                    self.assertEqual(row["reason"], "")
+                    self.assertNotIn(private, json.dumps(row))
+                    _append_ledger(path, row)
+                with patch("app.store._append_ledger", side_effect=inspect_append) as append:
+                    result = self.review("refuse", reason_code="other", reason=private)
+                append.assert_called_once()
+                self.assertEqual(result["reason_codes"]["no_identifiers"], "identifier_in_refusal_reason")
+                self.assertNotIn(private, json.dumps(result))
+                self.assertNotIn(private, self.store.ledger_path.read_text(encoding="utf-8"))
+                self.assertEqual(self.store.latest_generation(self.draft["id"])["status"], "READY_FOR_REVIEW")
+        with closing(self.store.connect()) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM reviews").fetchone()[0], 0)
+
+    def test_invalid_codes_and_non_other_text_are_rejected_without_copying_text(self):
+        for code, text, expected in (
+            ("", "", "refusal_reason_required"),
+            ("unapproved-private-code", "", "refusal_reason_invalid"),
+            ("duplicate", "private extra detail", "refusal_details_only_for_other"),
+            ("other", "x" * 1001, "refusal_reason_too_long"),
+        ):
+            with self.subTest(expected=expected):
+                result = self.review("refuse", reason_code=code, reason=text)
+                self.assertEqual(result["status"], "BLOCKED")
+                self.assertEqual(result["reason_codes"]["release_gate"], expected)
+                self.assertEqual(result["reason"], "")
+        self.assertNotIn("unapproved-private-code", self.store.ledger_path.read_text(encoding="utf-8"))
+        self.assertNotIn("private extra detail", self.store.ledger_path.read_text(encoding="utf-8"))
+
+    def test_identifiers_are_screened_even_when_text_is_sent_with_a_fixed_code(self):
+        result = self.review("refuse", reason_code="duplicate", reason="fictional.private@example.test")
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertEqual(result["checks"]["no_identifiers"], "FAIL")
+        self.assertEqual(self.store.ledger_rows()["rows"][-1]["reason"], "")
 
     def test_blocked_donor_generation_cannot_be_released(self):
         donor = gate(self.store, DraftInput(client_reference="DONOR-TEST", session_date="2026-11-07", note=SEED_NOTES[2]))
@@ -283,18 +343,23 @@ class ReviewTests(unittest.TestCase):
         legacy = rows[-1]
         legacy["version"] = 3
         del legacy["released_funder_view"]
+        del legacy["reason_code"]
         legacy["hash"] = digest({key: value for key, value in legacy.items() if key != "hash"})
         self.store.ledger_path.write_text(
             "".join(json.dumps(item) + "\n" for item in rows), encoding="utf-8",
         )
         with closing(self.store.connect()) as connection, connection:
             connection.execute("UPDATE reviews SET ledger_hash = ?", (legacy["hash"],))
+            connection.execute("ALTER TABLE reviews DROP COLUMN reason_code")
+        self.store.initialize()
+        self.store.initialize()  # The additive migration is idempotent.
+        self.assertEqual(self.store.latest_generation(self.draft["id"])["review_reason_code"], "")
         prefix = self.store.ledger_path.read_bytes()
         self.assertEqual(self.store.quarterly_totals(2026, 4)["session_count"], 1)
         _, generated = self.make_ready()
         self.assertEqual(self.review(generation=generated)["status"], "RELEASED")
         self.assertTrue(self.store.ledger_path.read_bytes().startswith(prefix))
-        self.assertEqual(self.store.ledger_rows()["rows"][-1]["version"], 4)
+        self.assertEqual(self.store.ledger_rows()["rows"][-1]["version"], 5)
         self.assertEqual(self.store.quarterly_totals(2026, 4)["session_count"], 2)
 
     def test_ledger_lists_every_row_with_full_hashes_and_no_note_text(self):

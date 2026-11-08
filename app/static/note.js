@@ -14,6 +14,8 @@ const generationStatus = document.querySelector("#generation-status");
 const releaseButton = document.querySelector("#release-button");
 const refuseButton = document.querySelector("#refuse-button");
 const refusalReason = document.querySelector("#refusal-reason");
+const refusalOther = document.querySelector("#refusal-other");
+const refusalOtherText = document.querySelector("#refusal-other-text");
 const reviewStatus = document.querySelector("#review-status");
 let currentGeneration = null;
 let dirty = false;
@@ -63,7 +65,10 @@ const reasonText = {
   generation_not_ready: "only held, valid views can be reviewed",
   already_reviewed: "this output already has a final review decision",
   newer_generation_exists: "reopen the latest generated views before reviewing",
-  refusal_reason_required: "enter a refusal reason",
+  refusal_reason_required: "select a refusal reason",
+  refusal_reason_invalid: "select one of the listed refusal reasons",
+  refusal_details_only_for_other: "use the Other option for additional text",
+  identifier_in_refusal_reason: "identifying detail found in Other text; remove it before refusing",
   refusal_reason_too_long: "keep the reason within 1,000 characters",
   note_already_released: "this note has already been released and counted",
   rules_changed: "the reporting rules changed; generate fresh views",
@@ -145,7 +150,9 @@ function renderGeneration(result) {
     output.hidden = false;
     document.querySelector("#review-controls").hidden = result.status !== "READY_FOR_REVIEW";
     if (result.reviewed_at) {
-      document.querySelector("#review-receipt").textContent = `Reviewed by ${result.reviewer_name} on ${new Date(result.reviewed_at).toLocaleString()}${result.review_reason ? ` — ${result.review_reason}` : ""}${result.is_current === false ? ". This is the reviewed snapshot; the note or rules have since changed." : ""}`;
+      const refusalLabel = [...refusalReason.options].find(option => option.value && option.value === result.review_reason_code)?.textContent;
+      const reviewReason = [refusalLabel, result.review_reason].filter(Boolean).join(": ");
+      document.querySelector("#review-receipt").textContent = `Reviewed by ${result.reviewer_name} on ${new Date(result.reviewed_at).toLocaleString()}${reviewReason ? ` — ${reviewReason}` : ""}${result.is_current === false ? ". This is the reviewed snapshot; the note or rules have since changed." : ""}`;
     }
   }
 }
@@ -230,20 +237,24 @@ async function reviewViews(action) {
     reviewStatus.textContent = "Enter the reviewing counselor's name before releasing or refusing.";
     return;
   }
-  if (action === "refuse" && !refusalReason.value.trim()) {
-    reviewStatus.textContent = "Enter a refusal reason.";
+  if (action === "refuse" && !refusalReason.value) {
+    reviewStatus.textContent = "Select a refusal reason.";
     return;
   }
   const identifier = currentGeneration.id;
   releaseButton.disabled = refuseButton.disabled = generateButton.disabled = true;
-  reviewerInput.disabled = refusalReason.disabled = fields.disabled = true;
+  reviewerInput.disabled = refusalReason.disabled = refusalOtherText.disabled = fields.disabled = true;
   reviewStatus.classList.remove("error");
   reviewStatus.dataset.state = "STARTED";
   reviewStatus.textContent = "Recording review…";
   try {
     const result = await responseData(await fetch(`/api/generations/${encodeURIComponent(identifier)}/${action}`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ reviewer_name: reviewerInput.value, reason: action === "refuse" ? refusalReason.value : "" }),
+      body: JSON.stringify({
+        reviewer_name: reviewerInput.value,
+        reason_code: action === "refuse" ? refusalReason.value : "",
+        reason: action === "refuse" && refusalReason.value === "other" ? refusalOtherText.value : "",
+      }),
     }));
     if (result.status === "BLOCKED") {
       reviewStatus.dataset.state = "BLOCKED";
@@ -251,6 +262,8 @@ async function reviewViews(action) {
       reviewStatus.classList.add("error");
     } else {
       refusalReason.value = "";
+      refusalOtherText.value = "";
+      refusalOther.hidden = true;
       await loadGeneration();
     }
   } catch (error) {
@@ -259,12 +272,15 @@ async function reviewViews(action) {
     reviewStatus.classList.add("error");
   } finally {
     releaseButton.disabled = refuseButton.disabled = generateButton.disabled = false;
-    reviewerInput.disabled = refusalReason.disabled = fields.disabled = false;
+    reviewerInput.disabled = refusalReason.disabled = refusalOtherText.disabled = fields.disabled = false;
   }
 }
 
 releaseButton.addEventListener("click", () => reviewViews("release"));
 refuseButton.addEventListener("click", () => reviewViews("refuse"));
+refusalReason.addEventListener("change", () => {
+  refusalOther.hidden = refusalReason.value !== "other";
+});
 
 generateButton.addEventListener("click", async () => {
   if (!draftId || dirty) return;

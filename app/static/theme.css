@@ -161,6 +161,8 @@ pre { background: #f4f7fa; border-color: #dee5ec; border-radius: 8px; padding: 1
 .funder-summary dd { margin: 0; color: #15385e; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
 .review-controls { margin-top: 24px; padding-top: 21px; border-top: 1px solid #e1e7ed; }
 .review-controls textarea { min-height: 88px; }
+.review-controls select { display: block; width: 100%; margin-bottom: 20px; }
+#refusal-other-hint { margin: 0 0 10px; }
 #review-receipt:not(:empty) { padding: 12px 14px; border-radius: 8px; background: #ebf0f5; color: #697786; font-size: 11px; line-height: 1.7; }
 @media (min-width: 1500px) { main { margin-top: 52px; } }
 @media (max-width: 1100px) {

@@ -23,6 +23,7 @@ class GenerateRequest(BaseModel):
 class ReviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     reviewer_name: str = Field(default="", max_length=100)
+    reason_code: str = Field(default="", max_length=80)
     reason: str = Field(default="", max_length=1000)
 
 
@@ -142,7 +143,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         try:
             return gate(
                 store, action=action, generation_id=str(generation_id),
-                reviewer_name=request.reviewer_name, reason=request.reason,
+                reviewer_name=request.reviewer_name, reason_code=request.reason_code, reason=request.reason,
             )
         except (GenerationNotFoundError, DraftNotFoundError):
             raise HTTPException(404, "Generated views not found.") from None
