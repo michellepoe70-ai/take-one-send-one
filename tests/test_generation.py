@@ -123,6 +123,61 @@ class GenerationGateTests(unittest.TestCase):
         self.assertIn("no_narrative", result["failed_rules"])
         self.assertIsNone(result["funder_view"])
 
+    def test_hipaa_safe_harbor_blocks_zip_code_and_records_failure(self):
+        output = copy.deepcopy(SAFE_OUTPUT)
+        output["funder_view"]["service_area"] = "33125"
+        result, _ = self.generate(output)
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertEqual(result["checks"]["hipaa_safe_harbor"], "FAIL")
+        self.assertEqual(result["checks"]["no_identifiers"], "PASS")
+        self.assertEqual(self.rows()[-1]["checks"]["hipaa_safe_harbor"], "FAIL")
+        self.assertIsNone(result["funder_view"])
+        self.assertNotIn("funder_view", self.rows()[-1])
+
+    def test_hipaa_safe_harbor_blocks_phone_number_and_records_failure(self):
+        output = copy.deepcopy(SAFE_OUTPUT)
+        output["funder_view"]["language"] = "305-555-0199"
+        result, _ = self.generate(output)
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertEqual(result["checks"]["hipaa_safe_harbor"], "FAIL")
+        self.assertEqual(self.rows()[-1]["checks"]["hipaa_safe_harbor"], "FAIL")
+        self.assertNotIn("305-555-0199", json.dumps(self.rows()[-1]))
+
+    def test_hipaa_safe_harbor_clean_seed_view_passes_with_original_rules_unchanged(self):
+        result, _ = self.generate()
+        self.assertEqual(result["status"], "READY_FOR_REVIEW")
+        self.assertEqual(result["checks"]["hipaa_safe_harbor"], "PASS")
+        self.assertEqual(self.rows()[-1]["checks"]["hipaa_safe_harbor"], "PASS")
+        self.assertEqual(result["funder_view"], SAFE_OUTPUT["funder_view"])
+        self.assertEqual(set(result["checks"].values()), {"PASS"})
+
+    def test_legacy_five_rule_generation_remains_verifiable_and_release_rechecks_six_rules(self):
+        from app.policy import digest
+        result, _ = self.generate()
+        rows = self.rows()
+        previous = "0" * 64
+        for row in rows:
+            if row["version"] == 7:
+                row["version"] = 2
+                del row["checks"]["hipaa_safe_harbor"]
+            row["previous_hash"] = previous
+            row["hash"] = digest({key: value for key, value in row.items() if key != "hash"})
+            previous = row["hash"]
+        self.store.ledger_path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        with closing(self.store.connect()) as connection, connection:
+            connection.execute(
+                "UPDATE generations SET ledger_hash = ?, checks = ? WHERE id = ?",
+                (previous, json.dumps(rows[-1]["checks"]), result["id"]),
+            )
+        prefix = self.store.ledger_path.read_bytes()
+        latest = self.store.latest_generation(self.saved["id"])
+        self.assertEqual(latest["checks"]["hipaa_safe_harbor"], "NOT_EVALUATED")
+        released = gate(self.store, action="release", generation_id=result["id"], reviewer_name="Demo Reviewer")
+        self.assertEqual(released["status"], "RELEASED")
+        self.assertEqual(released["checks"]["hipaa_safe_harbor"], "PASS")
+        self.assertEqual(self.rows()[-1]["version"], 8)
+        self.assertTrue(self.store.ledger_path.read_bytes().startswith(prefix))
+
     def test_named_human_is_required_before_any_model_call(self):
         result, generator = self.generate(reviewer_name="")
         self.assertEqual(result["failed_rules"], ["named_human"])

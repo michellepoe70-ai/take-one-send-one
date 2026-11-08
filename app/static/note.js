@@ -51,6 +51,7 @@ async function responseData(response) {
 const reasonText = {
   client_list_by_diagnosis_requested: "client list by diagnosis requested",
   identifier_in_funder_view: "identifier found in the funder view",
+  safe_harbor_identifier_in_funder_view: "Safe Harbor identifier or unapproved identifying text found in the funder view",
   unexpected_or_missing_fields: "fields differ from the approved demo schema",
   unconstrained_or_invalid_funder_value: "free text or an invalid field value was produced",
   named_reviewer_required: "a named human reviewer is required",

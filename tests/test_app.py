@@ -186,7 +186,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(chain.length, 7)
         self.assertEqual(chain.head, rows[-1]["hash"])
         self.assertEqual([row["reviewer_name"] for row in rows if row.get("event") == "VIEWED"], ["First Reviewer", "Second Reviewer"])
-        self.assertEqual({row["version"] for row in rows}, {1, 2, 5, 6})
+        self.assertEqual({row["version"] for row in rows}, {1, 6, 7, 8})
         for previous, current in zip(rows, rows[1:]):
             self.assertEqual(current["previous_hash"], previous["hash"])
         self.assertEqual(self.store.latest_generation(saved["id"])["status"], "RELEASED")

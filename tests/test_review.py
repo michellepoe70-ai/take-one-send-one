@@ -62,7 +62,7 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(reopened["review_ledger_hash"], result["ledger_hash"])
         self.assertEqual(reopened["funder_view"], SAFE_OUTPUT["funder_view"])
         row = self.store.ledger_rows()["rows"][-1]
-        self.assertEqual(row["version"], 5)
+        self.assertEqual(row["version"], 8)
         self.assertEqual(row["released_funder_view"], SAFE_OUTPUT["funder_view"])
         self.assertEqual(row["released_funder_view"]["language"], "en")
         self.assertEqual(row["released_funder_view"]["reporting_period"], "2026-11")
@@ -344,6 +344,7 @@ class ReviewTests(unittest.TestCase):
         legacy["version"] = 3
         del legacy["released_funder_view"]
         del legacy["reason_code"]
+        del legacy["checks"]["hipaa_safe_harbor"]
         legacy["hash"] = digest({key: value for key, value in legacy.items() if key != "hash"})
         self.store.ledger_path.write_text(
             "".join(json.dumps(item) + "\n" for item in rows), encoding="utf-8",
@@ -359,7 +360,7 @@ class ReviewTests(unittest.TestCase):
         _, generated = self.make_ready()
         self.assertEqual(self.review(generation=generated)["status"], "RELEASED")
         self.assertTrue(self.store.ledger_path.read_bytes().startswith(prefix))
-        self.assertEqual(self.store.ledger_rows()["rows"][-1]["version"], 5)
+        self.assertEqual(self.store.ledger_rows()["rows"][-1]["version"], 8)
         self.assertEqual(self.store.quarterly_totals(2026, 4)["session_count"], 2)
 
     def test_ledger_lists_every_row_with_full_hashes_and_no_note_text(self):

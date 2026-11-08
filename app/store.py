@@ -14,7 +14,8 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.policy import (
-    DEFAULT_RULES_PATH, RULE_NAMES, contains_identifiers, digest, is_named_human,
+    DEFAULT_RULES_PATH, LEGACY_RULE_NAMES, RULE_NAMES, contains_identifiers,
+    contains_safe_harbor_identifiers, digest, is_named_human,
     load_policy, requests_client_list,
 )
 from app.refusals import REFUSAL_REASONS
@@ -90,21 +91,22 @@ def verify_ledger(path: Path) -> Chain:
                 if not isinstance(row, dict):
                     raise LedgerIntegrityError("Invalid ledger structure.")
                 version = row.get("version")
+                row_rules = RULE_NAMES if version in {7, 8} else LEGACY_RULE_NAMES
                 required = base_fields if version == 1 else base_fields | generation_fields
                 if version == 6:
                     required = viewed_fields
-                if version in {3, 4, 5}:
+                if version in {3, 4, 5, 8}:
                     required |= review_fields
-                if version in {4, 5}:
+                if version in {4, 5, 8}:
                     required |= {"released_funder_view"}
-                if version == 5:
+                if version in {5, 8}:
                     required |= {"reason_code"}
                 if (
                     not line.endswith(b"\n")
                     or not isinstance(row, dict)
                     or set(row) != required
                     or type(row["version"]) is not int
-                    or row["version"] not in {1, 2, 3, 4, 5, 6}
+                    or row["version"] not in {1, 2, 3, 4, 5, 6, 7, 8}
                     or type(row["sequence"]) is not int
                     or row["sequence"] != sequence
                     or row["previous_hash"] != previous
@@ -125,11 +127,11 @@ def verify_ledger(path: Path) -> Chain:
                     if row["action"] not in {"draft.create.requested", "draft.update.requested"}:
                         raise LedgerIntegrityError("Invalid draft action.")
                 elif (
-                    (version == 2 and (
+                    (version in {2, 7} and (
                         row["action"] != "views.generate"
                         or row["status"] not in {"STARTED", "READY_FOR_REVIEW", "BLOCKED", "ERROR"}
                     ))
-                    or (version in {3, 4, 5} and (
+                    or (version in {3, 4, 5, 8} and (
                         row["action"] not in {"views.release", "views.refuse"}
                         or row["status"] not in {"RELEASED", "REFUSED", "BLOCKED"}
                         or not isinstance(row["reason"], str)
@@ -139,9 +141,9 @@ def verify_ledger(path: Path) -> Chain:
                         or not isinstance(row["released_funder_hash"], str)
                         or len(row["released_funder_hash"]) != 64
                     ))
-                    or not isinstance(row["checks"], dict) or set(row["checks"]) != set(RULE_NAMES)
+                    or not isinstance(row["checks"], dict) or set(row["checks"]) != set(row_rules)
                     or any(value not in {"PASS", "FAIL", "NOT_EVALUATED"} for value in row["checks"].values())
-                    or row["failed_rules"] != [name for name in RULE_NAMES if row["checks"][name] == "FAIL"]
+                    or row["failed_rules"] != [name for name in row_rules if row["checks"][name] == "FAIL"]
                     or (row["status"] == "BLOCKED") != bool(row["failed_rules"])
                     or not isinstance(row["reason_codes"], dict)
                     or any(not isinstance(value, str) for value in row["reason_codes"].values())
@@ -149,16 +151,16 @@ def verify_ledger(path: Path) -> Chain:
                     or len(row["rules_hash"]) != 64 or len(row["output_hash"]) != 64
                 ):
                     raise LedgerIntegrityError("Invalid generation audit row.")
-                if version in {3, 4, 5} and row["status"] == "RELEASED" and any(value != "PASS" for value in row["checks"].values()):
+                if version in {3, 4, 5, 8} and row["status"] == "RELEASED" and any(value != "PASS" for value in row["checks"].values()):
                     raise LedgerIntegrityError("A release must pass every rule.")
-                if version in {4, 5}:
+                if version in {4, 5, 8}:
                     funder = row["released_funder_view"]
                     if row["status"] == "RELEASED":
                         if not isinstance(funder, dict) or row["released_funder_hash"] != digest(funder):
                             raise LedgerIntegrityError("Released ledger content failed verification.")
                     elif funder is not None:
                         raise LedgerIntegrityError("Only a release may contain a funder snapshot.")
-                if version == 5:
+                if version in {5, 8}:
                     code = row["reason_code"]
                     if (
                         not isinstance(code, str) or (code and code not in REFUSAL_REASONS)
@@ -297,6 +299,7 @@ class Store:
         result = dict(row)
         for key in ("funder_view", "checks", "reason_codes"):
             result[key] = json.loads(result[key]) if result[key] is not None else None
+        result["checks"].setdefault("hipaa_safe_harbor", "NOT_EVALUATED")
         try:
             current_policy_hash = load_policy(self.rules_path).hash
         except (OSError, ValueError, TypeError, KeyError):
@@ -340,7 +343,7 @@ class Store:
                 try:
                     row = by_hash[review["ledger_hash"]]
                     saved_funder = json.loads(review["funder_snapshot"])
-                    funder = row["released_funder_view"] if row["version"] in {4, 5} else saved_funder
+                    funder = row["released_funder_view"] if row["version"] in {4, 5, 8} else saved_funder
                     if (
                         row["status"] != "RELEASED" or row["action"] != "views.release"
                         or row["generation_id"] != review["generation_id"]
@@ -480,6 +483,10 @@ def gate(
                     except (ValidationError, TypeError, ValueError):
                         checks["no_narrative"] = "FAIL"
                         reasons["no_narrative"] = "unconstrained_or_invalid_funder_value"
+                    unsafe_harbor = contains_safe_harbor_identifiers(funder, policy, source["client_reference"])
+                    checks["hipaa_safe_harbor"] = "FAIL" if unsafe_harbor else "PASS"
+                    if unsafe_harbor:
+                        reasons["hipaa_safe_harbor"] = "safe_harbor_identifier_in_funder_view"
                     if generation["rules_hash"] != policy.hash and not state_error:
                         state_error = "rules_changed"
                 except (OSError, ValueError, TypeError, KeyError):
@@ -513,7 +520,7 @@ def gate(
             failed = [name for name in RULE_NAMES if checks[name] == "FAIL"]
             status = "BLOCKED" if failed else ("RELEASED" if action == "release" else "REFUSED")
             row = {
-                "version": 5, "sequence": chain.length + 1, "event_id": str(uuid4()),
+                "version": 8, "sequence": chain.length + 1, "event_id": str(uuid4()),
                 "timestamp": now, "action": "views." + action, "draft_id": draft_id,
                 "payload_hash": generation["source_hash"], "previous_hash": chain.head,
                 "generation_id": generation_id, "status": status, "checks": checks,
@@ -556,7 +563,7 @@ def gate(
                 checks["allowed_fields"] = "FAIL"
                 reasons["allowed_fields"] = "invalid_rules_file"
 
-            # All five rule decisions live inside the sole write/action gate.
+            # All rule decisions live inside the sole write/action gate.
             if requests_client_list(source["note"]):
                 checks["no_identifiers"] = "FAIL"
                 reasons["no_identifiers"] = "client_list_by_diagnosis_requested"
@@ -573,7 +580,7 @@ def gate(
             def audit(status):
                 nonlocal chain
                 row = {
-                    "version": 2, "sequence": chain.length + 1, "event_id": str(uuid4()),
+                    "version": 7, "sequence": chain.length + 1, "event_id": str(uuid4()),
                     "timestamp": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
                     "action": "views.generate", "draft_id": draft_id,
                     "payload_hash": source_hash, "previous_hash": chain.head,
@@ -620,6 +627,10 @@ def gate(
                     checks["no_identifiers"] = "FAIL" if identifiers else "PASS"
                     if identifiers:
                         reasons["no_identifiers"] = "identifier_in_funder_view"
+                    unsafe_harbor = contains_safe_harbor_identifiers(funder, policy, source["client_reference"])
+                    checks["hipaa_safe_harbor"] = "FAIL" if unsafe_harbor else "PASS"
+                    if unsafe_harbor:
+                        reasons["hipaa_safe_harbor"] = "safe_harbor_identifier_in_funder_view"
                     try:
                         policy.funder_model.model_validate(funder)
                         valid = policy.output_model.model_validate(candidate)

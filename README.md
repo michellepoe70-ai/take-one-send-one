@@ -69,6 +69,10 @@ Stop the server with Ctrl+C.
   appends, flushes, and syncs this row before the single-draft API returns the
   note. A missing reviewer or failed audit write prevents the note from opening.
   Viewing leaves draft and generation states unchanged.
+- Version 7 generation rows and version 8 review rows add the sixth
+  `hipaa_safe_harbor` check. Earlier five-rule rows remain unchanged and are
+  verified using their original format. An older generation displays this check
+  as `NOT_EVALUATED`; Release evaluates it before writing a new decision.
 
 The existing Reviewing counselor field supplies the name for opening a saved
 note. Enter it and press Tab if prompted; it is remembered for this browser tab's
@@ -92,7 +96,7 @@ Plain-language labels, month names, and language names are a browser display
 layer only; the stored and released funder values retain their original schema
 keys and codes.
 
-All five decisions are made inside `gate()`:
+All six decisions are made inside `gate()`:
 
 | Rule | Check |
 | --- | --- |
@@ -100,7 +104,16 @@ All five decisions are made inside `gate()`:
 | `no_identifiers` | Block client-list requests by diagnosis before any model call. Reject identifier fields, the source client reference, emails, phone-like strings, and diagnosis-code labels in generated funder content. |
 | `no_narrative` | Validate funder values against the constrained schema; reject free text, objects, lists, and invalid values. Internal narrative is kept separate. |
 | `named_human` | Require a non-placeholder counselor name before normal generation. It is recorded locally and in audit metadata; this prototype does not authenticate that identity. |
-| `release_gate` | Hold generation for review. Release requires the explicit review action, current source/rules, valid output hashes, and all five passing checks. Requests to release as part of generation remain blocked. |
+| `release_gate` | Hold generation for review. Release requires the explicit review action, current source/rules, valid output hashes, and all required passing checks. Requests to release as part of generation remain blocked. |
+| `hipaa_safe_harbor` | Screen the five permitted funder values for the 18 Safe Harbor identifier categories, using the existing identifier patterns plus additional patterns and a closed-value fallback. Exact schema-approved program-site codes and the exact reporting-month format pass; other geography, finer dates, unknown text, objects, and opaque codes fail. |
+
+The sixth check follows the categories in [HHS's de-identification guidance](https://www.hhs.gov/hipaa/for-professionals/special-topics/de-identification/index.html).
+An exact `service_area` enumeration is a funder program-site code, not a client
+address. An exact `reporting_period` month is a permitted reporting code. These
+exceptions are field-specific: extra text or a day-level date is blocked. The
+check screens only the five closed funder fields; it is not a de-identification
+tool for arbitrary clinical narratives, images, or biometric data. The five
+existing rules and the funder schema are unchanged.
 
 A dangerous source request produces a durable `BLOCKED` decision immediately.
 Otherwise a `STARTED` ledger row is flushed and synced before the SDK receives
@@ -180,7 +193,7 @@ From this directory:
 ```
 
 Tests use temporary data directories, Python's standard library, and Uvicorn.
-They cover HTTP create/read/update and generation, persistence, all five rules,
+They cover HTTP create/read/update and generation, persistence, all six rules,
 ledger-before-database and ledger-before-model ordering, failed writes, tampering,
 truncation, concurrent saves, seed idempotence, stale views, and the real SDK's
 strict output schema/configuration. Model responses in automated tests are

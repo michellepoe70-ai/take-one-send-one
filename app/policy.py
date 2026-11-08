@@ -10,7 +10,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
 
-RULE_NAMES = ("allowed_fields", "no_identifiers", "no_narrative", "named_human", "release_gate")
+LEGACY_RULE_NAMES = ("allowed_fields", "no_identifiers", "no_narrative", "named_human", "release_gate")
+RULE_NAMES = LEGACY_RULE_NAMES + ("hipaa_safe_harbor",)
 PERIOD_PATTERN = "^[0-9]{4}-(0[1-9]|1[0-2])$"
 DEFAULT_RULES_PATH = Path(__file__).parent.parent / "rules" / "funder_view.json"
 IDENTIFIER_KEYS = {
@@ -93,6 +94,69 @@ def contains_identifiers(value, client_reference: str) -> bool:
             or re.search(r"(?:\+?\d[\d ().-]{6,}\d)", value)
             or re.search(r"\b(?:ICD[- ]?10|diagnosis\s+code|SSN)\b", value, re.I)
         )
+    return False
+
+
+# HHS Safe Harbor categories. Closed-field checks below also reject unrecognized
+# names, locations, media, and opaque codes that cannot be identified by regex.
+SAFE_HARBOR_PATTERNS = tuple(re.compile(pattern, re.I) for pattern in (
+    r"\b(?:names?|first[\s_-]*name|last[\s_-]*name|patient[\s_-]*name|client[\s_-]*name)\s*[:=]",
+    r"\b\d{5}(?:-\d{4})?\b|\b(?:street|address|city|county|precinct|zip|postal[\s_-]*code)\b",
+    r"\b\d{4}[-/]\d{1,2}(?:[-/]\d{1,2})?\b|\b\d{1,2}[-/]\d{1,2}(?:[-/]\d{2,4})?\b"
+    r"|\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}\b"
+    r"|\b(?:age|aged)\s*[:=]?\s*(?:9\d|[1-9]\d{2,})\b",
+    r"(?:\+?\d[\d ().-]{6,}\d)",
+    r"\b(?:fax|facsimile)\b",
+    r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}",
+    r"\b\d{3}[- ]?\d{2}[- ]?\d{4}\b|\b(?:ssn|social[\s_-]*security)\b",
+    r"\b(?:mrn|medical[\s_-]*record(?:[\s_-]*(?:number|no|id))?)\b",
+    r"\b(?:health[\s_-]*plan|beneficiary|member[\s_-]*(?:number|no|id))\b",
+    r"\b(?:account|acct)(?:[\s_-]*(?:number|no|id))?\b",
+    r"\b(?:certificate|licen[cs]e)(?:[\s_-]*(?:number|no|id))?\b",
+    r"\b(?:vin|vehicle|licen[cs]e[\s_-]*plate)\b|\b[A-HJ-NPR-Z0-9]{17}\b",
+    r"\b(?:device|serial|imei|udi|mac[\s_-]*address)\b",
+    r"\b(?:[a-z][a-z0-9+.-]*://|www\.)\S+|\b(?:[a-z0-9-]+\.)+[a-z]{2,63}(?:/\S*)?",
+    r"\b(?:\d{1,3}\.){3}\d{1,3}\b|(?<!\w)(?:[0-9a-f]{0,4}:){2,}[0-9a-f:.]{0,39}(?!\w)",
+    r"\b(?:biometric|finger[\s_-]*print|voice[\s_-]*print|retina|iris[\s_-]*scan|facial[\s_-]*template)\b",
+    r"data:image/|<img\b|\b(?:full[\s_-]*face|face[\s_-]*(?:photo|image)|photograph|portrait)\b",
+    r"\b(?:unique[\s_-]*(?:id|identifier|code)|identifying[\s_-]*code|uuid|guid)\b"
+    r"|\b[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\b",
+))
+FUNDER_FIELDS = ("reporting_period", "service_type", "session_count", "language", "service_area")
+
+
+def contains_safe_harbor_identifiers(funder_view, policy: Policy, client_reference: str = "") -> bool:
+    """Screen only the five funder values, with exact reporting-code exceptions."""
+    if not isinstance(funder_view, dict):
+        return True
+    properties = policy.schema["properties"]
+    for field in FUNDER_FIELDS:
+        if field not in funder_view:
+            continue  # Missing fields are handled by the existing allowed_fields rule.
+        value = funder_view[field]
+        spec = properties.get(field, {})
+        if field == "reporting_period":
+            if isinstance(value, str) and spec.get("pattern") == PERIOD_PATTERN and re.fullmatch(PERIOD_PATTERN, value):
+                continue
+        if field == "service_area":
+            # These exact funder-owned values are program-site codes, not addresses.
+            if isinstance(value, str) and value in spec.get("enum", ()):
+                continue
+            return True
+        if contains_identifiers(value, client_reference):
+            return True
+        if isinstance(value, str) and any(pattern.search(value) for pattern in SAFE_HARBOR_PATTERNS):
+            return True
+        # Conservative fallback: arbitrary names, addresses, photos/biometrics,
+        # and other unique codes cannot pass as unrecognized text or objects.
+        if spec.get("type") == "string" and spec.get("enum"):
+            if not isinstance(value, str) or value not in spec["enum"]:
+                return True
+        elif spec.get("type") == "integer":
+            if type(value) is not int or not spec["minimum"] <= value <= spec["maximum"]:
+                return True
+        else:
+            return True
     return False
 
 
